@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tempfile
 from typing import List, Optional
 
 from dotenv import load_dotenv
@@ -39,7 +40,14 @@ def _parse_analysts(raw: str) -> List[str]:
 
 
 def _load_config(config_json: str) -> dict:
-    """--config-json 覆盖项 → 与 DEFAULT_CONFIG 合并。非法 JSON 直接退出。"""
+    """--config-json 覆盖项 → 与 DEFAULT_CONFIG 合并。非法 JSON 直接退出。
+
+    headless 场景默认**不落盘任何产物文件**（避免磁盘被灌满）：
+    - ``persist_state_log=False``：不写 full_states_log JSON；
+    - ``memory_log_path=""``：完全不写 trading_memory.md（memory.py 空路径即禁用）；
+    - ``results_dir`` 收敛到系统临时目录（否则 __init__ 会在 ~/.tradingagents 建目录）。
+    调用方在 --config-json 里显式给这三项时，以显式值为准。
+    """
     from tradingagents.default_config import DEFAULT_CONFIG
 
     overrides: dict = {}
@@ -52,6 +60,16 @@ def _load_config(config_json: str) -> dict:
             raise SystemExit("--config-json 必须是 JSON 对象")
     merged = DEFAULT_CONFIG.copy()
     merged.update(overrides)
+    # 无状态默认值：仅当调用方未在 --config-json 显式指定时才强制生效
+    # （覆盖 DEFAULT_CONFIG，否则 headless 会照默认写盘）。
+    if "persist_state_log" not in overrides:
+        merged["persist_state_log"] = False
+    if "memory_log_path" not in overrides:
+        merged["memory_log_path"] = ""
+    if "results_dir" not in overrides:
+        merged["results_dir"] = tempfile.gettempdir()
+    if "data_cache_dir" not in overrides:
+        merged["data_cache_dir"] = tempfile.gettempdir()
     return merged
 
 

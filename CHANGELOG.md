@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.18] — 2026-09-02
+
+### headless CLI 默认无状态（不落盘产物文件）
+
+此前每次深析会同步写出：
+- `results_dir/<ticker>/TradingAgentsStrategy_logs/full_states_log_<date>.json`（完整状态大 JSON）
+- `memory_log_path` 追加式 `trading_memory.md`
+- `data_cache_dir` 行情 CSV 缓存 + `results_dir`/`data_cache_dir` 目录创建
+
+对 Web / 交互 CLI 这些是复盘与记忆功能；但对 headless（自动调用）场景会持续占服务器磁盘。改造：
+
+- `default_config.py` 新增 `persist_state_log`（默认 `true`，Web/CLI 行为不变）
+- `trading_graph.py` `_log_state` 尊重 `persist_state_log`：关掉则跳过写 full_states_log JSON
+- `cli/headless.py` 默认注入无状态配置：`persist_state_log=false`、`memory_log_path=""`（memory 空路径即完全禁用）、`results_dir`/`data_cache_dir` 收敛到系统临时目录；调用方在 `--config-json` 显式给这三项时以显式值为准
+- 新增 `tests/test_headless_stateless.py`（写盘开关），扩充 `tests/test_headless_cli.py`（无状态默认与显式覆盖）
+
 ## [0.5.17] — 2026-09-02
 
 ### 新增：官方 headless CLI（`tradingagents-run` / `python -m cli.headless`）

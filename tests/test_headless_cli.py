@@ -92,3 +92,37 @@ def test_load_config_merges_defaults(monkeypatch):
     cfg = headless._load_config('{"llm_provider":"deepseek"}')
     assert cfg["llm_provider"] == "deepseek"
     assert cfg["a"] == 1
+
+
+def test_load_config_headless_is_stateless(monkeypatch):
+    """headless 默认不落盘：state log 关、memory 关、results/cache 收敛到 /tmp。"""
+    fake = types.SimpleNamespace(DEFAULT_CONFIG={
+        "llm_provider": "openai", "persist_state_log": True,
+        "memory_log_path": "~/.tradingagents/memory/trading_memory.md",
+        "results_dir": "~/.tradingagents/logs",
+        "data_cache_dir": "~/.tradingagents/cache",
+    })
+    monkeypatch.setitem(sys.modules, "tradingagents.default_config", fake)
+    cfg = headless._load_config("{}")
+    assert cfg["persist_state_log"] is False
+    assert cfg["memory_log_path"] == ""
+    assert cfg["results_dir"] == headless.tempfile.gettempdir()
+    assert cfg["data_cache_dir"] == headless.tempfile.gettempdir()
+
+
+def test_load_config_explicit_overrides_stateless_defaults(monkeypatch):
+    """调用方在 --config-json 显式给开关时，尊重显式值。"""
+    fake = types.SimpleNamespace(DEFAULT_CONFIG={
+        "llm_provider": "openai", "persist_state_log": True,
+        "memory_log_path": "default", "results_dir": "default",
+        "data_cache_dir": "default",
+    })
+    monkeypatch.setitem(sys.modules, "tradingagents.default_config", fake)
+    cfg = headless._load_config(
+        '{"persist_state_log": true, "memory_log_path": "/x/mem.md",'
+        ' "results_dir": "/x/logs", "data_cache_dir": "/x/cache"}'
+    )
+    assert cfg["persist_state_log"] is True
+    assert cfg["memory_log_path"] == "/x/mem.md"
+    assert cfg["results_dir"] == "/x/logs"
+    assert cfg["data_cache_dir"] == "/x/cache"

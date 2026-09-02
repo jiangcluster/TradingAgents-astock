@@ -68,6 +68,11 @@ DEFAULT_CONFIG = {
     # Checkpoint/resume: when True, LangGraph saves state after each node
     # so a crashed run can resume from the last successful step.
     "checkpoint_enabled": False,
+    # Persist the full final-state JSON per run (results_dir/<ticker>/
+    # TradingAgentsStrategy_logs/full_states_log_<date>.json). Headless /
+    # automation callers turn this off so disk is not filled by one large
+    # JSON per analysed ticker.
+    "persist_state_log": True,
     # Output language for analyst reports and final decision
     # Internal agent debate stays in English for reasoning quality
     "output_language": "Chinese",
