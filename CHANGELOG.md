@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.17] — 2026-09-02
+
+### 新增：官方 headless CLI（`tradingagents-run` / `python -m cli.headless`）
+
+供外部自动化系统（如 a-share-deep-advisor 深研雷达）以纯后端方式调用，无需 Web 前端：
+
+- 新增 `cli/headless.py`：`--code`（6 位代码）+ `--date` + `--analysts`（逗号分隔，默认 7 分析师）+ `--config-json`（与 `DEFAULT_CONFIG` 浅合并的覆盖项）。
+  输出 stdout **最后一行**为 JSON（`decision` / `final_trade_decision` / `investment_plan`）；失败走非零退出码 + stderr，绝不弹交互。
+- 新增 console script `tradingagents-run = "cli.headless:main"`；pyproject 注册。
+
+### 依赖拆分：Web 前端移入可选 extra
+
+`streamlit` / `fpdf2` 从必需依赖移至 `[project.optional-dependencies] web`。
+纯后端 / headless / 深研调用场景 `pip install -e .` 即够，不再强制安装前端依赖；需要 Web UI（`tradingagents-web`）时安装 `pip install -e ".[web]"`。
+`web/` 目录与 `tradingagents-web` 入口保留不动。
+
+### 测试
+
+- 新增 `tests/test_headless_cli.py`（参数解析 / config 合并 / 失败路径 / JSON 输出，propagate 全 mock）。
+- `web` 相关测试文件加 `pytest.importorskip("streamlit")`：未装 `[web]` extra 时自动跳过，不破坏测试收集。
+
 ## [0.5.16] — 2026-09-02
 
 ### 修复：只传部分 `config` 时 `TradingAgentsGraph` 直接 KeyError（#101）

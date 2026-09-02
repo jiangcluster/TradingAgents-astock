@@ -1,5 +1,9 @@
 """Tests for web stock display labels."""
 
+import pytest
+
+pytest.importorskip("streamlit", reason="web extra not installed")
+
 import web.stock_display as stock_display
 
 

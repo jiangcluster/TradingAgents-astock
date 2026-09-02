@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
+pytest.importorskip("streamlit", reason="web extra not installed")
+
 from web.progress import ProgressTracker
 
 

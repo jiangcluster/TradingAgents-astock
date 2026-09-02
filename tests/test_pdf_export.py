@@ -3,6 +3,9 @@
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("streamlit", reason="web extra not installed")
+
 from fpdf.enums import WrapMode
 
 from web.pdf_export import (
