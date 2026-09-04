@@ -634,7 +634,6 @@ def _em_kline_fallback(code: str, start_date: str = None, end_date: str = None) 
     Returns DataFrame with columns: Date, Open, High, Low, Close, Volume.
     """
     secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
-    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
     params = {
         "secid": secid,
         "fields1": "f1,f2,f3,f4,f5,f6",
@@ -645,9 +644,19 @@ def _em_kline_fallback(code: str, start_date: str = None, end_date: str = None) 
         "lmt": "800",
         "ut": "b2884a393a59ad64002292a3e90d46a5",
     }
-    r = _em_get(url, params=params, timeout=15)
-    d = r.json()
-    klines = ((d.get("data") or {}).get("klines")) or []
+    # push2his 主站会被部分机房间歇性断连；push2delay 镜像实测稳定（astock-data 同源降级）
+    klines = []
+    for host in ("push2his.eastmoney.com", "push2delay.eastmoney.com"):
+        url = f"https://{host}/api/qt/stock/kline/get"
+        try:
+            r = _em_get(url, params=params, timeout=15)
+            d = r.json()
+            klines = ((d.get("data") or {}).get("klines")) or []
+            if klines:
+                break
+        except Exception as e:
+            logger.warning("eastmoney kline %s failed for %s: %s", host, code, e)
+            continue
     rows = []
     for k in klines:
         p = k.split(",")
