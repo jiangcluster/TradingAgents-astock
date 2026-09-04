@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.19] — 2026-09-04
+
+### Added：headless 输出新增 `analysis_detail`（多 Agent 全流程结构化透传）
+
+此前 headless stdout 末行 JSON 只有 5 个字段（`ticker` / `date` / `decision` /
+`final_trade_decision` / `investment_plan`），7 份分析师报告、多空投资辩论、
+风控三方辩论等全流程产物随运行结束即丢失——下游（a-share-deep-advisor 深研）
+只能拿到一份截断摘要，报告「分股深析详情」内容单薄。
+
+- `run_headless` 返回值新增 `analysis_detail` 结构化字典：
+  - `analyst_reports`：7 维分析师非空报告 `{维度 key: 报告全文}`（空报告过滤）
+  - `data_quality_summary`：数据质量一句话总结
+  - `investment_debate` / `risk_debate`：`history`（辩论全文）+ `judge_decision`
+    （裁判/组长裁决）+ `rounds`（实际轮数）
+  - `trader_investment_plan`：交易员投资方案
+  - `final_trade_decision`：投组经理终裁（与顶层字段一致，便于聚合）
+- **向后兼容**：原有 5 字段不变；旧调用方忽略多余字段即可，无需任何改动。
+
+### Tests
+
+- `tests/test_headless_cli.py`：新增 `analysis_detail` 结构完整性 / 空报告过滤 /
+  辩论轮数归一（`count` → `rounds`）用例；全量 9 passed。
+
 ## [0.5.18] — 2026-09-02
 
 ### headless CLI 默认无状态（不落盘产物文件）

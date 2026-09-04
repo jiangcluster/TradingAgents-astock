@@ -16,7 +16,18 @@
 输出（stdout 单行 JSON）：:
 
     {"code":"600362","date":"2026-09-02","decision":"Buy",
-     "final_trade_decision":"...","investment_plan":"..."}
+     "final_trade_decision":"...","investment_plan":"...",
+     "analysis_detail":{
+       "analyst_reports":{"market":"...","social":"...",...},
+       "data_quality_summary":"...",
+       "investment_debate":{"history":"...","bull_history":"...",
+                            "bear_history":"...","judge_decision":"...","rounds":2},
+       "trader_investment_plan":"...",
+       "risk_debate":{"history":"...","judge_decision":"...","rounds":2},
+       "final_trade_decision":"..."}}
+
+``analysis_detail`` 透传完整分析过程（7 分析师报告 / 多空辩论 / 风控辩论 / 裁决链），
+供下游（如深研报告）渲染深析详情；为空的分析师报告不透传。
 
 API key 读取顺序：进程环境变量 → ``load_dotenv()``（cwd/.env）。
 """
@@ -90,6 +101,49 @@ def run_headless(
         "decision": decision if isinstance(decision, str) else str(decision),
         "final_trade_decision": str(final_state.get("final_trade_decision", "")),
         "investment_plan": str(final_state.get("investment_plan", "")),
+        "analysis_detail": _build_analysis_detail(final_state),
+    }
+
+
+# 分析师报告字段：state 键 -> 输出键（report 为空的分析师不透传）
+_ANALYST_REPORT_KEYS = (
+    ("market_report", "market"),
+    ("sentiment_report", "social"),
+    ("news_report", "news"),
+    ("fundamentals_report", "fundamentals"),
+    ("policy_report", "policy"),
+    ("hot_money_report", "hot_money"),
+    ("lockup_report", "lockup"),
+)
+
+
+def _build_analysis_detail(final_state: dict) -> dict:
+    """从最终状态提取完整分析过程（7 分析师报告 / 多空辩论 / 风控辩论 / 裁决链），供下游渲染深析详情"""
+    reports = {}
+    for state_key, out_key in _ANALYST_REPORT_KEYS:
+        report = str(final_state.get(state_key) or "").strip()
+        if report:
+            reports[out_key] = report
+
+    invest_debate = final_state.get("investment_debate_state") or {}
+    risk_debate = final_state.get("risk_debate_state") or {}
+    return {
+        "analyst_reports": reports,
+        "data_quality_summary": str(final_state.get("data_quality_summary") or ""),
+        "investment_debate": {
+            "history": str(invest_debate.get("history") or ""),
+            "bull_history": str(invest_debate.get("bull_history") or ""),
+            "bear_history": str(invest_debate.get("bear_history") or ""),
+            "judge_decision": str(invest_debate.get("judge_decision") or ""),
+            "rounds": int(invest_debate.get("count") or 0),
+        },
+        "trader_investment_plan": str(final_state.get("trader_investment_plan") or ""),
+        "risk_debate": {
+            "history": str(risk_debate.get("history") or ""),
+            "judge_decision": str(risk_debate.get("judge_decision") or ""),
+            "rounds": int(risk_debate.get("count") or 0),
+        },
+        "final_trade_decision": str(final_state.get("final_trade_decision") or ""),
     }
 
 
