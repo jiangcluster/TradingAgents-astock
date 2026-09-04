@@ -622,6 +622,60 @@ def _ths_eps_forecast(code: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# 东财 K-line fallback helper (direct HTTP via _em_get, 前复权日 K)
+# ---------------------------------------------------------------------------
+
+
+def _em_kline_fallback(code: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+    """Fetch daily K-line from 东方财富 push2his as mootdx fallback.
+
+    2026-09-04 接入：mootdx（通达信 TCP 7709）/ 新浪在部分网络时段不可用，
+    东财 push2his（与 astock-data 同源、经 _em_get 节流）实测稳定。
+    Returns DataFrame with columns: Date, Open, High, Low, Close, Volume.
+    """
+    secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    params = {
+        "secid": secid,
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+        "klt": "101",
+        "fqt": "1",
+        "end": "20500101",
+        "lmt": "800",
+        "ut": "b2884a393a59ad64002292a3e90d46a5",
+    }
+    r = _em_get(url, params=params, timeout=15)
+    d = r.json()
+    klines = ((d.get("data") or {}).get("klines")) or []
+    rows = []
+    for k in klines:
+        p = k.split(",")
+        if len(p) < 6:
+            continue
+        try:
+            rows.append({
+                "Date": p[0],
+                "Open": float(p[1]),
+                "High": float(p[2]),
+                "Low": float(p[3]),
+                "Close": float(p[4]),
+                "Volume": float(p[5]),
+            })
+        except (TypeError, ValueError):
+            continue
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["Date"] = pd.to_datetime(df["Date"])
+    if start_date:
+        df = df[df["Date"] >= pd.to_datetime(start_date)]
+    if end_date:
+        df = df[df["Date"] <= pd.to_datetime(end_date)]
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Sina K-line fallback helper (direct HTTP, no akshare)
 # ---------------------------------------------------------------------------
 
@@ -790,14 +844,17 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
         df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
         df = _normalize_ohlcv_dates(df)
     except Exception as e:
-        logger.warning("mootdx OHLCV failed for %s: %s, trying sina HTTP fallback", code, e)
-        # Fallback: Sina direct HTTP API
-        try:
-            df = _sina_kline_fallback(code)
-            if df.empty:
-                raise ValueError(f"No OHLCV data from sina for {code}")
-        except Exception:
-            raise ValueError(f"No OHLCV data from mootdx/sina for {code}")
+        logger.warning("mootdx OHLCV failed for %s: %s, trying eastmoney/sina HTTP fallback", code, e)
+        # Fallback 1: 东财 push2his（_em_get 节流）
+        df = _em_kline_fallback(code)
+        if df.empty:
+            # Fallback 2: Sina direct HTTP API
+            try:
+                df = _sina_kline_fallback(code)
+                if df.empty:
+                    raise ValueError(f"No OHLCV data from sina for {code}")
+            except Exception:
+                raise ValueError(f"No OHLCV data from mootdx/eastmoney/sina for {code}")
 
     df, _ = _supplement_stale_ohlcv_with_sina(code, df, curr_date, start_date=None)
 
@@ -852,15 +909,18 @@ def get_stock_data(
         df = _normalize_ohlcv_dates(df)
 
     except Exception as e:
-        logger.warning("mootdx K-line failed for %s: %s, trying sina HTTP fallback", code, e)
-        # Fallback: Sina direct HTTP API
-        try:
-            df = _sina_kline_fallback(code, start_date, end_date)
-            if df.empty:
-                return "K线数据获取失败：mootdx和新浪备用源均不可用，请检查网络连接"
-            data_source = "sina HTTP (fallback)"
-        except Exception:
-            return "K线数据获取失败：mootdx和新浪备用源均不可用，请检查网络连接"
+        logger.warning("mootdx K-line failed for %s: %s, trying eastmoney/sina HTTP fallback", code, e)
+        # Fallback 1: 东财 push2his（_em_get 节流）
+        df = _em_kline_fallback(code, start_date, end_date)
+        if df.empty:
+            # Fallback 2: Sina direct HTTP API
+            try:
+                df = _sina_kline_fallback(code, start_date, end_date)
+                if df.empty:
+                    return "K线数据获取失败：mootdx、东财和新浪备用源均不可用，请检查网络连接"
+            except Exception:
+                return "K线数据获取失败：mootdx、东财和新浪备用源均不可用，请检查网络连接"
+        data_source = "eastmoney HTTP (fallback)"
 
     df, supplemented = _supplement_stale_ohlcv_with_sina(code, df, end_date, start_date)
     if supplemented:
