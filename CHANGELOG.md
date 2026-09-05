@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.20] — 2026-09-05
+
+### Fixed：北向资金缓存原子写（多票并行深析场景的共享写盘竞争修复）
+
+下游 a-share-deep-advisor 0.18.0 将深析改为多票并行（每票一个独立
+`python -m cli.headless` 子进程）。`a_stock._save_northbound_snapshot` 对全局
+缓存 `northbound_daily.csv` 的「读 → 改 → 写」是多进程并发下唯一共享写盘点，
+非原子写会相互竞争、可能留下半截文件。
+
+- 改为临时文件写入 + `os.replace` 原子替换；异常路径清理临时文件。
+- 行为不变：同日去重、按日期排序、`date, hgt, sgt` 三列格式均保持。
+
+### Tests
+
+- `tests/test_northbound_cache.py`（新增）：乱序写入排序 + 同日去重、
+  原子替换后无临时文件残留、已有历史数据保留。
+
 ## [0.5.19] — 2026-09-04
 
 ### Added：headless 输出新增 `analysis_detail`（多 Agent 全流程结构化透传）

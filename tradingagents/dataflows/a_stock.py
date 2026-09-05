@@ -1869,8 +1869,15 @@ def _northbound_cache_path() -> str:
 
 
 def _save_northbound_snapshot(date_str: str, hgt: float, sgt: float) -> None:
-    """Append today's northbound close to local CSV cache (dedup by date)."""
+    """Append today's northbound snapshot to the local CSV cache (dedup by date).
+
+    Atomic replacement via temp file + ``os.replace``: when running deep analyses
+    for multiple tickers in parallel, multiple TA subprocesses write to this shared
+    cache concurrently, so a non-atomic read-modify-write would race and could leave
+    a half-written file behind.
+    """
     import csv
+    import tempfile
 
     path = _northbound_cache_path()
     existing: dict[str, tuple[str, str]] = {}
@@ -1883,11 +1890,22 @@ def _save_northbound_snapshot(date_str: str, hgt: float, sgt: float) -> None:
                     existing[row[0]] = (row[1], row[2])
     existing[date_str] = (f"{hgt:.2f}", f"{sgt:.2f}")
     sorted_dates = sorted(existing.keys())
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["date", "hgt", "sgt"])
-        for d in sorted_dates:
-            writer.writerow([d, existing[d][0], existing[d][1]])
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".northbound_", suffix=".tmp", dir=os.path.dirname(path)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["date", "hgt", "sgt"])
+            for d in sorted_dates:
+                writer.writerow([d, existing[d][0], existing[d][1]])
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _load_northbound_history(n: int = 20) -> list[tuple[str, float, float]]:
