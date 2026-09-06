@@ -612,3 +612,43 @@ def test_concept_blocks_survives_fallback_exception(monkeypatch):
 
     assert out.startswith("Error fetching concept blocks for 603613")
     assert "baidu down" in out
+
+
+# ---------------------------------------------------------------------------
+# 回归：get_fundamentals 一致预期段（BUG: 用旧 5 列索引解析 2 列 yjycData）
+# ---------------------------------------------------------------------------
+
+def _patch_ths_forecast(monkeypatch, rows):
+    """mock _ths_eps_forecast，喂 2 列（年度/预测每股收益）DataFrame。"""
+    df = pd.DataFrame(rows, columns=["年度", "预测每股收益"])
+    monkeypatch.setattr(a_stock, "_ths_eps_forecast", lambda code: df)
+    # Forward PE 段依赖腾讯实时价，mock 成固定价格，专注断言一致预期解析段
+    monkeypatch.setattr(
+        a_stock, "_tencent_quote",
+        lambda codes: {c: {"price": 10.0, "pe_ttm": 5.0} for c in codes},
+    )
+
+
+def test_get_fundamentals_parses_two_column_eps_forecast(monkeypatch):
+    """yjycData 修复后是 2 列，get_fundamentals 必须按列名解析。"""
+    _patch_ths_forecast(monkeypatch, [("2027", "1.83"), ("2026", "0.91")])
+
+    out = a_stock.get_fundamentals("603613")
+
+    assert "FY2027: EPS=1.83" in out
+    assert "FY2026: EPS=0.91" in out
+    # 旧 bug 行为：EPS 恒 0 / 误报 low coverage / 无 Forward PE
+    assert "EPS=0.0" not in out
+    assert "low coverage" not in out
+    assert "Forward PE (FY2026):" in out
+    assert "PEG:" in out
+
+
+def test_get_fundamentals_eps_forecast_empty_skips_section(monkeypatch):
+    """无一致预期数据时整段略过，不得报错或输出假 EPS。"""
+    monkeypatch.setattr(a_stock, "_ths_eps_forecast", lambda code: pd.DataFrame())
+
+    out = a_stock.get_fundamentals("603613")
+
+    assert "Consensus EPS Forecast" not in out
+    assert "FY" not in out

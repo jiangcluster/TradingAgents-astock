@@ -1211,25 +1211,13 @@ def get_fundamentals(
                 lines.append("\n--- Consensus EPS Forecast (同花顺) ---")
                 eps_by_year = {}
                 for _, row in forecast_df.iterrows():
-                    year = str(row.iloc[0]) if len(row) > 0 else ""
-                    mean_eps_val = row.iloc[3] if len(row) > 3 else 0
-                    count_val = row.iloc[1] if len(row) > 1 else 0
-                    min_eps_val = row.iloc[2] if len(row) > 2 else "N/A"
-                    max_eps_val = row.iloc[4] if len(row) > 4 else "N/A"
+                    year = str(row["年度"])
+                    eps_val = row["预测每股收益"]
                     try:
-                        mean_eps = float(mean_eps_val)
-                    except (ValueError, TypeError):
-                        mean_eps = 0
-                    try:
-                        count = int(count_val)
-                    except (ValueError, TypeError):
-                        count = 0
-                    lines.append(
-                        f"FY{year}: EPS={mean_eps} "
-                        f"(range {min_eps_val}~{max_eps_val}, {count} analysts)"
-                    )
-                    if count < 3:
-                        lines.append("  Warning: low coverage (<3 analysts)")
+                        mean_eps = float(eps_val)
+                    except (TypeError, ValueError):
+                        mean_eps = 0.0
+                    lines.append(f"FY{year}: EPS={mean_eps}")
                     eps_by_year[year] = mean_eps
 
                 # Forward PE / PEG / PE digestion

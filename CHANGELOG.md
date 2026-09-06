@@ -27,6 +27,13 @@ Breaking changes within the 0.x line are called out explicitly.
   还会因裸字符串当文件路径抛 FileNotFoundError）。现改为从 `yjycData` 提取
   年度×EPS，过滤无预测年份；`get_profit_forecast` 同步适配新列（`年度` /
   `预测每股收益`），并去掉不存在的机构数/区间列输出。
+- **一致预期调用点列索引错位（BUG，0.5.21 复核发现）**：`_ths_eps_forecast`
+  已改为 2 列（`年度` / `预测每股收益`），但 `get_fundamentals` 的一致预期段
+  仍用旧 5 列索引（`row.iloc[3]` / `row.iloc[1]` / `row.iloc[2]` /
+  `row.iloc[4]`）解析：`mean_eps` 恒为 0（iloc[3] 越界）、分析师数误取 EPS
+  数值（"32 analysts" 实为 3.2）、区间恒 "N/A"、每条都误报 "low coverage"，
+  Forward PE / PEG 段因 `eps_by_year` 全 0 而静默缺失。现改为按列名解析，
+  输出 `FY{年度}: EPS=xx`，Forward PE / PEG 正常计算；无预测年份时整段略过。
 - **资金流 / 行业断连（网络降级）**：`_em_get` 对 `push2` / `push2his` 主站
   间歇断连（ConnectionError / Timeout / 5xx）降级到 `push2delay` 镜像；非
   push2 主机不换、镜像也失败则返回 `last_resp`，保持既有限流时间戳更新。
@@ -42,7 +49,10 @@ Breaking changes within the 0.x line are called out explicitly.
   8 期上限 / 畸形与旧 schema 返回空 / 10054 重试；一致预期 `yjycData` 提取 /
   无数据与畸形 JSON 返回空 / 非法行过滤；`_em_get` 断连/超时/5xx 走镜像、
   主站正常不走、双挂抛异常、非 push2 不换；`_em_concept_blocks` 解析与
-  403/空/非零降级、百度优先、降级异常吞掉。全量回归 423 passed / 13 skipped。
+  `403/空/非零降级、百度优先、降级异常吞掉。全量回归 423 passed / 13 skipped。
+- `get_fundamentals` 一致预期段追加 2 例回归：2 列 yjycData 按列名解析出
+  `FY2027: EPS=1.83` 且无假 EPS/假 low coverage/Forward PE 正常；空预测时
+  整段略过、不输出假 `FY` 行。
 
 ## [0.5.20] — 2026-09-05
 
