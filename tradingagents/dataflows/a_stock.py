@@ -647,7 +647,14 @@ def _eastmoney_datacenter(
 def _ths_eps_forecast(code: str) -> pd.DataFrame:
     """Fetch consensus EPS forecast from 同花顺 (direct HTTP).
 
-    Returns DataFrame with columns roughly: 年度, 预测机构数, 最小值, 均值, 最大值.
+    Returns DataFrame with columns roughly: 年度, 预测每股收益.
+    注意：同花顺页面未给出机构数/区间，只有年度×EPS 的时间序列（SJ=实际值）。
+
+    2026-09-06 修正：同花顺 worth.html 的盈利预测数据在 `id="yjycData"` 的
+    内嵌 JSON 里（`[年份, EPS, 净利润, "SJ"]`，SJ=实际值、null=暂无预测），
+    页面里唯一的 HTML 表格是「研报评级」图例（评级/说明两列），旧代码回退取
+    `dfs[0]` 会把图例表当 EPS 表，产出 FY公司评级/EPS=0.0 之类的假数据。
+    现改为直接从 `yjycData` 提取。
     """
     url = f"https://basic.10jqka.com.cn/new/{code}/worth.html"
     headers = {
@@ -656,20 +663,29 @@ def _ths_eps_forecast(code: str) -> pd.DataFrame:
     }
     r = _requests.get(url, headers=headers, timeout=15)
     r.encoding = "gbk"
-    # pandas 2.1+ 起 read_html 不再接受 HTML 字符串（会当文件路径 open，抛
-    # FileNotFoundError）；必须包 StringIO。同花顺页面偶发无表格时 read_html
-    # 抛 ValueError，按"无覆盖"处理。
-    try:
-        dfs = pd.read_html(StringIO(r.text))
-    except ValueError:
+    html = r.text
+    m = _re.search(r'id="yjycData"\s+class="none">(.*?)</div>', html, _re.S)
+    if not m:
         return pd.DataFrame()
-    # Find the table containing EPS data
-    for df in dfs:
-        cols = [str(c) for c in df.columns]
-        if any("每股收益" in c or "均值" in c for c in cols):
-            return df
-    # Fallback: return first table if exists
-    return dfs[0] if dfs else pd.DataFrame()
+    try:
+        rows = _json.loads(m.group(1))
+    except (ValueError, TypeError):
+        return pd.DataFrame()
+    data = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        year = str(row[0]) if row[0] is not None else ""
+        eps = row[1]
+        if not year.isdigit() or eps is None:
+            continue  # 过滤"暂无预测"的年份行
+        try:
+            data.append({"年度": year, "预测每股收益": float(eps)})
+        except (TypeError, ValueError):
+            continue
+    if not data:
+        return pd.DataFrame()
+    return pd.DataFrame(data)
 
 
 # ---------------------------------------------------------------------------
@@ -1821,25 +1837,13 @@ def get_profit_forecast(
 
         eps_by_year = {}
         for _, row in df.iterrows():
-            year = str(row.iloc[0]) if len(row) > 0 else ""
-            count_val = row.iloc[1] if len(row) > 1 else 0
-            mean_eps_val = row.iloc[3] if len(row) > 3 else 0
-            min_eps_val = row.iloc[2] if len(row) > 2 else "N/A"
-            max_eps_val = row.iloc[4] if len(row) > 4 else "N/A"
+            year = str(row["年度"])
+            eps_val = row["预测每股收益"]
             try:
-                count = int(count_val)
-            except (ValueError, TypeError):
-                count = 0
-            try:
-                mean_eps = float(mean_eps_val)
-            except (ValueError, TypeError):
-                mean_eps = 0
-            lines.append(
-                f"FY{year}: EPS={mean_eps} (range {min_eps_val}~{max_eps_val}), "
-                f"analysts={count}"
-            )
-            if count < 3:
-                lines.append("  Warning: low coverage (<3 analysts)")
+                mean_eps = float(eps_val)
+            except (TypeError, ValueError):
+                mean_eps = 0.0
+            lines.append(f"FY{year}: EPS={mean_eps}")
             eps_by_year[year] = mean_eps
 
         # Forward valuation

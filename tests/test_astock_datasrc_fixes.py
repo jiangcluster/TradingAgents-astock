@@ -1,7 +1,10 @@
 """数据源缺失修复的回归测试（2026-09-05）。
 
 覆盖四处修复：
-- BUG1 `_ths_eps_forecast`：pandas 3.x 下 read_html 必须包 StringIO（否则当文件路径 open）
+- BUG1 `_ths_eps_forecast`：同花顺一致预期实际在 id=yjycData 内嵌 JSON，
+  页面唯一 HTML 表是「研报评级」图例；旧代码 read_html 回退取 dfs[0]
+  → 产出 FY公司评级/EPS=0.0 假数据（且 pandas 3.x 下裸字符串抛
+  FileNotFoundError）。现直接从 yjycData 提取，无数据返回空表
 - BUG2 `_get_financial_report_sina`：Sina getFinanceReport2022 实际返回
   ``data.report_list`` 为 {报告期: {"data": [科目条目]}} 的 dict，旧代码误取
   ``data[source_type]`` 当 list → 恒解析 0 条（三表全空）
@@ -249,21 +252,19 @@ def test_get_balance_sheet_reports_no_data_on_empty(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# BUG1: 同花顺 read_html 必须包 StringIO
+# BUG1: 同花顺一致预期（read_html StringIO + yjycData 内嵌 JSON）
 # ---------------------------------------------------------------------------
 
 _THS_HTML = """
 <html><body>
-<table>
-  <tr><th>年度</th><th>预测机构数</th><th>最小值</th><th>均值</th><th>最大值</th></tr>
-  <tr><td>2026</td><td>12</td><td>1.10</td><td>1.35</td><td>1.60</td></tr>
-</table>
+<table><tr><th>评级</th><th>说明</th></tr><tr><td>公司评级</td><td>12个月内相对沪深300</td></tr></table>
+<div id="yjycData" class="none">[["2019","0.91","1.59","SJ"],["2026",null,null,"SJ"],["2027","1.83","13.22","SJ"]]</div>
 </body></html>
 """
 
 
-def test_ths_eps_forecast_parses_html_string(monkeypatch):
-    """pandas 3.x：传裸 HTML 字符串会被当文件路径 open → FileNotFoundError。"""
+def test_ths_eps_forecast_parses_yjyc_data(monkeypatch):
+    """一致预期取自 id=yjycData 内嵌 JSON，而非（唯一的）评级图例表。"""
     monkeypatch.setattr(
         a_stock._requests, "get",
         lambda *a, **k: FakeResp(text=_THS_HTML),
@@ -272,27 +273,44 @@ def test_ths_eps_forecast_parses_html_string(monkeypatch):
     df = a_stock._ths_eps_forecast("603613")
 
     assert not df.empty
-    assert any("均值" in str(c) for c in df.columns)
+    # null 预测年份被过滤，只留实际值年份
+    assert list(df["年度"]) == ["2019", "2027"]
+    assert list(df["预测每股收益"]) == [0.91, 1.83]
 
 
-def test_ths_eps_forecast_no_table_returns_empty(monkeypatch):
-    """页面无表格时 read_html 抛 ValueError，应按“无覆盖”返回空表。"""
+def test_ths_eps_forecast_no_yjyc_data_returns_empty(monkeypatch):
+    """页面无 yjycData（或纯图例）时按"无覆盖"返回空表，不得误取图例表。"""
     monkeypatch.setattr(
         a_stock._requests, "get",
-        lambda *a, **k: FakeResp(text="<html><body><p>no table</p></body></html>"),
+        lambda *a, **k: FakeResp(text="<html><body><table><tr><th>评级</th><th>说明</th></tr></table></body></html>"),
     )
 
     assert a_stock._ths_eps_forecast("603613").empty
 
 
-def test_ths_eps_forecast_falls_back_to_first_table(monkeypatch):
-    html = "<html><body><table><tr><th>其他</th></tr><tr><td>1</td></tr></table></body></html>"
+def test_ths_eps_forecast_malformed_yjyc_data_returns_empty(monkeypatch):
+    """yjycData 内容非法 JSON 时返回空表。"""
+    monkeypatch.setattr(
+        a_stock._requests, "get",
+        lambda *a, **k: FakeResp(text='<div id="yjycData" class="none">not-json</div>'),
+    )
+
+    assert a_stock._ths_eps_forecast("603613").empty
+
+
+def test_ths_eps_forecast_filters_non_eps_rows(monkeypatch):
+    """非数字年份 / 非数字 EPS / 缺 EPS 的行应被过滤。"""
+    html = (
+        '<div id="yjycData" class="none">'
+        '[["2026","1.10","5.00","SJ"],["notnum","0.5","1","X"],["2027","abc","1","X"],["2028",null,null,"SJ"]]'
+        "</div>"
+    )
     monkeypatch.setattr(a_stock._requests, "get", lambda *a, **k: FakeResp(text=html))
 
     df = a_stock._ths_eps_forecast("603613")
 
-    assert not df.empty
-    assert list(df.columns) == ["其他"]
+    assert list(df["年度"]) == ["2026"]
+    assert list(df["预测每股收益"]) == [1.10]
 
 
 # ---------------------------------------------------------------------------
