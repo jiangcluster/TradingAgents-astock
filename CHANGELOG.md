@@ -19,10 +19,14 @@ Breaking changes within the 0.x line are called out explicitly.
   列=各报告期（`YYYY-MM-DD` 倒序）、值=`item_value`；保留 `curr_date` 截断
   （未来函数防护）、`annual` 只留 12 月期、最多 8 期上限；并加最多 2 次重试
   兜 Sina 偶发 10054 连接重置。
-- **一致预期抛异常（BUG）**：`_ths_eps_forecast` / `get_profit_forecast` 在
-  pandas 3.x 下 `pd.read_html(html_str)` 把 HTML 字符串当文件路径 `open` →
-  `FileNotFoundError`。改为 `pd.read_html(io.StringIO(html))`，无表格时捕获
-  `ValueError` 返回空。
+- **一致预期取错表（BUG，本机实测暴露）**：`_ths_eps_forecast` 用
+  `read_html` 解析同花顺 worth.html，但该页唯一 HTML 表是「研报评级」图例，
+  EPS 数据实际在 `id="yjycData"` 的内嵌 JSON（`[年份, EPS, 净利润, "SJ"]`，
+  SJ=实际值、null=暂无预测）。旧代码回退取 `dfs[0]` 把图例表当 EPS 表，
+  产出 `FY公司评级: EPS=0.0` 这类看似有数据实为垃圾的输出（pandas 3.x 下
+  还会因裸字符串当文件路径抛 FileNotFoundError）。现改为从 `yjycData` 提取
+  年度×EPS，过滤无预测年份；`get_profit_forecast` 同步适配新列（`年度` /
+  `预测每股收益`），并去掉不存在的机构数/区间列输出。
 - **资金流 / 行业断连（网络降级）**：`_em_get` 对 `push2` / `push2his` 主站
   间歇断连（ConnectionError / Timeout / 5xx）降级到 `push2delay` 镜像；非
   push2 主机不换、镜像也失败则返回 `last_resp`，保持既有限流时间戳更新。
@@ -33,12 +37,12 @@ Breaking changes within the 0.x line are called out explicitly.
 
 ### Tests
 
-- `tests/test_astock_datasrc_fixes.py`（新增，41 用例，全 monkeypatch 无网络）：
+- `tests/test_astock_datasrc_fixes.py`（新增，45 用例，全 monkeypatch 无网络）：
   覆盖三表 `report_list` 解析 / source 映射 / curr_date 截断 / annual 过滤 /
-  8 期上限 / 畸形与旧 schema 返回空 / 10054 重试；read_html StringIO 解析 /
-  无表格返回空；`_em_get` 断连/超时/5xx 走镜像、主站正常不走、双挂抛异常、
-  非 push2 不换；`_em_concept_blocks` 解析与 403/空/非零降级、百度优先、
-  降级异常吞掉。全量回归 423 passed / 13 skipped。
+  8 期上限 / 畸形与旧 schema 返回空 / 10054 重试；一致预期 `yjycData` 提取 /
+  无数据与畸形 JSON 返回空 / 非法行过滤；`_em_get` 断连/超时/5xx 走镜像、
+  主站正常不走、双挂抛异常、非 push2 不换；`_em_concept_blocks` 解析与
+  403/空/非零降级、百度优先、降级异常吞掉。全量回归 423 passed / 13 skipped。
 
 ## [0.5.20] — 2026-09-05
 
