@@ -48,3 +48,31 @@ def test_save_northbound_snapshot_existing_history_preserved(monkeypatch, tmp_pa
         ["2026-08-28", "100.00", "-50.00"],
         ["2026-09-01", "1.50", "2.50"],
     ]
+
+
+def test_save_northbound_snapshot_sgt_none_writes_nan(monkeypatch, tmp_path):
+    """A5：上游停止披露 sgt 时写 nan 占位，不得伪装成「净流入 0 亿」。"""
+    from tradingagents.dataflows import a_stock
+
+    path = tmp_path / "northbound_daily.csv"
+    monkeypatch.setattr(a_stock, "_northbound_cache_path", lambda: str(path))
+    a_stock._save_northbound_snapshot("2026-09-01", -9.28, None)
+    rows = _read(path)
+    assert rows[1:] == [["2026-09-01", "-9.28", "nan"]]
+
+
+def test_save_northbound_snapshot_sgt_none_keeps_other_days(monkeypatch, tmp_path):
+    """nan 占位只影响当日行，既有含真实 sgt 的历史行不受污染。"""
+    from tradingagents.dataflows import a_stock
+
+    path = tmp_path / "northbound_daily.csv"
+    path.write_text("date,hgt,sgt\n2026-08-28,100.00,-50.00\n", encoding="utf-8")
+    monkeypatch.setattr(a_stock, "_northbound_cache_path", lambda: str(path))
+    a_stock._save_northbound_snapshot("2026-09-01", 1.5, None)
+    a_stock._save_northbound_snapshot("2026-09-02", 2.5, 3.5)
+    rows = _read(path)
+    assert rows[1:] == [
+        ["2026-08-28", "100.00", "-50.00"],
+        ["2026-09-01", "1.50", "nan"],
+        ["2026-09-02", "2.50", "3.50"],
+    ]

@@ -489,7 +489,8 @@ def _mootdx_call(method: str, **kwargs):
 def _tencent_quote(codes: list[str]) -> dict[str, dict]:
     """Batch real-time quotes from Tencent Finance (qt.gtimg.cn).
 
-    Returns dict[code] -> {name, price, pe_ttm, pb, mcap_yi, ...}
+    Returns dict[code] -> {name, price, pe_ttm, pe_dynamic, pb,
+    mcap_yi(总市值), float_mcap_yi(流通市值), ...}
     """
     prefixed = [f"{_get_prefix(c)}{c}" for c in codes]
     url = "https://qt.gtimg.cn/q=" + ",".join(prefixed)
@@ -517,12 +518,17 @@ def _tencent_quote(codes: list[str]) -> dict[str, dict]:
             "low": float(vals[34]) if vals[34] else 0,
             "turnover_pct": float(vals[38]) if vals[38] else 0,
             "pe_ttm": float(vals[39]) if vals[39] else 0,
-            "mcap_yi": float(vals[44]) if vals[44] else 0,
-            "float_mcap_yi": float(vals[45]) if vals[45] else 0,
+            # 实测（工商银行 601398）vals[44]=21919.47 < vals[45]=28975.83，
+            # 与东财 f116(总市值)/f117(流通市值) 交叉核对：44=流通市值、45=总市值。
+            "float_mcap_yi": float(vals[44]) if vals[44] else 0,
+            "mcap_yi": float(vals[45]) if vals[45] else 0,
             "pb": float(vals[46]) if vals[46] else 0,
             "limit_up": float(vals[47]) if vals[47] else 0,
             "limit_down": float(vals[48]) if vals[48] else 0,
-            "pe_static": float(vals[52]) if vals[52] else 0,
+            # vals[52] 经东财 datacenter RPT_VALUEANALYSIS_DET 显式命名字段终验：
+            # 对应网页「市盈率(动)」（当期年化），非静态 PE；静态 PE 需年报归母净利，
+            # 腾讯/东财现有字段均无法精确还原，故如实命名为 pe_dynamic。
+            "pe_dynamic": float(vals[52]) if vals[52] else 0,
         }
     return result
 
@@ -730,13 +736,17 @@ def _em_kline_fallback(code: str, start_date: str = None, end_date: str = None) 
         if len(p) < 6:
             continue
         try:
+            # 东财 kline 行格式（fields2=f51..f56）：
+            #   p[0]日期 p[1]开盘 p[2]收盘 p[3]最高 p[4]最低 p[5]成交量(手)
+            # 注意收盘在 p[2]、最高/最低在 p[3]/p[4]（非顺序 OHLC）。
+            # 成交量单位为「手」，×100 换算为「股」以对齐新浪降级源。
             rows.append({
                 "Date": p[0],
                 "Open": float(p[1]),
-                "High": float(p[2]),
-                "Low": float(p[3]),
-                "Close": float(p[4]),
-                "Volume": float(p[5]),
+                "Close": float(p[2]),
+                "High": float(p[3]),
+                "Low": float(p[4]),
+                "Volume": float(p[5]) * 100,
             })
         except (TypeError, ValueError):
             continue
@@ -744,6 +754,57 @@ def _em_kline_fallback(code: str, start_date: str = None, end_date: str = None) 
         return pd.DataFrame()
     df = pd.DataFrame(rows)
     df["Date"] = pd.to_datetime(df["Date"])
+    df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
+    if start_date:
+        df = df[df["Date"] >= pd.to_datetime(start_date)]
+    if end_date:
+        df = df[df["Date"] <= pd.to_datetime(end_date)]
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Tencent K-line fallback helper (web.ifzq.gtimg.cn, 与 astock-data 同源已验证)
+# ---------------------------------------------------------------------------
+
+
+def _tencent_kline_fallback(code: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+    """Fetch daily 前复权 K-line from 腾讯 web.ifzq.gtimg.cn as fallback.
+
+    行格式：[date, open, close, high, low, volume(手)]（注意收盘在 idx2）。
+    成交量单位「手」，×100 换算为「股」以对齐新浪/东财降级源。
+    Returns DataFrame with columns: Date, Open, High, Low, Close, Volume.
+    """
+    prefix = _get_prefix(code)
+    prefixed = f"{prefix}{code}"
+    url = (
+        "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+        f"?param={prefixed},day,,,800,qfq"
+    )
+    r = _requests.get(url, timeout=15, headers={"User-Agent": _UA})
+    r.raise_for_status()
+    d = _json.loads(r.text)
+    node = ((d.get("data") or {}).get(prefixed)) or {}
+    klines = node.get("qfqday") or node.get("day") or []
+
+    rows = []
+    for k in klines:
+        try:
+            date_str, open_s, close_s, high_s, low_s, vol_s = k[:6]
+            rows.append({
+                "Date": date_str,
+                "Open": float(open_s),
+                "Close": float(close_s),
+                "High": float(high_s),
+                "Low": float(low_s),
+                "Volume": float(vol_s) * 100,
+            })
+        except (TypeError, ValueError, IndexError):
+            continue
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
     if start_date:
         df = df[df["Date"] >= pd.to_datetime(start_date)]
     if end_date:
@@ -920,17 +981,23 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
         df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
         df = _normalize_ohlcv_dates(df)
     except Exception as e:
-        logger.warning("mootdx OHLCV failed for %s: %s, trying eastmoney/sina HTTP fallback", code, e)
+        logger.warning("mootdx OHLCV failed for %s: %s, trying eastmoney/tencent/sina HTTP fallback", code, e)
         # Fallback 1: 东财 push2his（_em_get 节流）
         df = _em_kline_fallback(code)
         if df.empty:
-            # Fallback 2: Sina direct HTTP API
+            # Fallback 2: 腾讯 web.ifzq.gtimg.cn（astock-data 同源已验证）
+            try:
+                df = _tencent_kline_fallback(code)
+            except Exception:
+                df = pd.DataFrame()
+        if df.empty:
+            # Fallback 3: Sina direct HTTP API
             try:
                 df = _sina_kline_fallback(code)
                 if df.empty:
                     raise ValueError(f"No OHLCV data from sina for {code}")
             except Exception:
-                raise ValueError(f"No OHLCV data from mootdx/eastmoney/sina for {code}")
+                raise ValueError(f"No OHLCV data from mootdx/eastmoney/tencent/sina for {code}")
 
     df, _ = _supplement_stale_ohlcv_with_sina(code, df, curr_date, start_date=None)
 
@@ -985,18 +1052,26 @@ def get_stock_data(
         df = _normalize_ohlcv_dates(df)
 
     except Exception as e:
-        logger.warning("mootdx K-line failed for %s: %s, trying eastmoney/sina HTTP fallback", code, e)
+        logger.warning("mootdx K-line failed for %s: %s, trying eastmoney/tencent/sina HTTP fallback", code, e)
         # Fallback 1: 东财 push2his（_em_get 节流）
         df = _em_kline_fallback(code, start_date, end_date)
+        data_source = "eastmoney HTTP (fallback)"
         if df.empty:
-            # Fallback 2: Sina direct HTTP API
+            # Fallback 2: 腾讯 web.ifzq.gtimg.cn（astock-data 同源已验证）
+            try:
+                df = _tencent_kline_fallback(code, start_date, end_date)
+                data_source = "tencent HTTP (fallback)"
+            except Exception:
+                df = pd.DataFrame()
+        if df.empty:
+            # Fallback 3: Sina direct HTTP API
             try:
                 df = _sina_kline_fallback(code, start_date, end_date)
                 if df.empty:
-                    return "K线数据获取失败：mootdx、东财和新浪备用源均不可用，请检查网络连接"
+                    return "K线数据获取失败：mootdx、东财、腾讯和新浪备用源均不可用，请检查网络连接"
+                data_source = "sina HTTP (fallback)"
             except Exception:
-                return "K线数据获取失败：mootdx、东财和新浪备用源均不可用，请检查网络连接"
-        data_source = "eastmoney HTTP (fallback)"
+                return "K线数据获取失败：mootdx、东财、腾讯和新浪备用源均不可用，请检查网络连接"
 
     df, supplemented = _supplement_stale_ohlcv_with_sina(code, df, end_date, start_date)
     if supplemented:
@@ -1138,7 +1213,7 @@ def get_fundamentals(
                         f"Name: {q['name']}",
                         f"Price: {q['price']}",
                         f"PE (TTM): {q['pe_ttm']}",
-                        f"PE (Static): {q['pe_static']}",
+                        f"PE (Dynamic): {q['pe_dynamic']}",
                         f"PB: {q['pb']}",
                         f"Market Cap (100M CNY): {q['mcap_yi']}",
                         f"Float Market Cap (100M CNY): {q['float_mcap_yi']}",
@@ -1346,6 +1421,9 @@ def _get_financial_report_sina(
         return pd.DataFrame()
 
     # 报告期 key 为 YYYYMMDD，按日期倒序；先按 curr_date / annual 过滤。
+    # 防未来函数：用「披露日 publish_date」与 cutoff 比较（报告期截止日 <= 当前日
+    # 不代表已披露，如 2025-12-31 年报次年 4 月才披露）；publish_date 缺失时
+    # 保守回退为报告期 + 法定最晚披露滞后（年报 4 个月 / 其余 3 个月）。
     cutoff = pd.to_datetime(curr_date) if curr_date else None
     periods = []
     for key in sorted(report_list.keys(), reverse=True):
@@ -1355,8 +1433,18 @@ def _get_financial_report_sina(
         period_dt = pd.to_datetime(pk, format="%Y%m%d", errors="coerce")
         if period_dt is pd.NaT:
             continue
-        if cutoff is not None and period_dt > cutoff:
-            continue
+        if cutoff is not None:
+            entry = report_list.get(pk) or {}
+            pub = pd.to_datetime(
+                str(entry.get("publish_date") or "").replace("-", ""),
+                format="%Y%m%d",
+                errors="coerce",
+            )
+            if pub is pd.NaT:
+                lag_months = 4 if pk[4:6] == "12" else 3
+                pub = period_dt + pd.DateOffset(months=lag_months)
+            if pub > cutoff:
+                continue
         if freq.lower() == "annual" and pk[4:6] != "12":
             continue
         periods.append((pk, period_dt))
@@ -1978,8 +2066,13 @@ def _northbound_cache_path() -> str:
     return os.path.join(cache_dir, "northbound_daily.csv")
 
 
-def _save_northbound_snapshot(date_str: str, hgt: float, sgt: float) -> None:
+def _save_northbound_snapshot(
+    date_str: str, hgt: float, sgt: float | None
+) -> None:
     """Append today's northbound snapshot to the local CSV cache (dedup by date).
+
+    ``sgt`` 允许为 None（上游已停止披露深股通盘中净买入），此时写入 ``nan``
+    占位而非 0，避免把「缺数据」伪装成「净流入 0 亿」污染历史均值。
 
     Atomic replacement via temp file + ``os.replace``: when running deep analyses
     for multiple tickers in parallel, multiple TA subprocesses write to this shared
@@ -1998,7 +2091,8 @@ def _save_northbound_snapshot(date_str: str, hgt: float, sgt: float) -> None:
             for row in reader:
                 if len(row) >= 3:
                     existing[row[0]] = (row[1], row[2])
-    existing[date_str] = (f"{hgt:.2f}", f"{sgt:.2f}")
+    sgt_txt = "nan" if sgt is None else f"{float(sgt):.2f}"
+    existing[date_str] = (f"{hgt:.2f}", sgt_txt)
     sorted_dates = sorted(existing.keys())
     fd, tmp_path = tempfile.mkstemp(
         prefix=".northbound_", suffix=".tmp", dir=os.path.dirname(path)
@@ -2068,7 +2162,7 @@ def get_northbound_flow(
     ]
 
     hgt_close = 0.0
-    sgt_close = 0.0
+    sgt_close: float | None = None
     got_realtime = False
 
     try:
@@ -2090,14 +2184,28 @@ def get_northbound_flow(
                 s = sgt[i] if i < len(sgt) else "N/A"
                 lines.append(f"  {t}: HGT={h} SGT={s}")
 
-            hgt_close = float(hgt[-1]) if hgt else 0
-            sgt_close = float(sgt[-1]) if sgt else 0
-            total = hgt_close + sgt_close
-            lines.append(
-                f"\nClose: HGT(沪股通)={hgt_close:.2f}亿 "
-                f"SGT(深股通)={sgt_close:.2f}亿 "
-                f"Total={total:.2f}亿"
-            )
+            hgt_close = float(hgt[-1]) if hgt else 0.0
+            # 实测（2026-09-06）dayChart 的 sgt 盘中仅约 35 点、09:44 后停更，
+            # 且量级（~380）与 hgt（~-9）口径不同：疑似上游已停止披露深股通盘中
+            # 净买入。仅当 sgt 覆盖完整时间序列（len==len(times)）时才采信其收盘
+            # 值，否则视为不可用（None），避免把残缺/异口径数据混入 Total 造成
+            # 巨额假净流入信号（原 -9.28+379.75=+370.47 亿实为沪股通净流出）。
+            sgt_full = bool(sgt) and len(sgt) == len(times)
+            sgt_close = float(sgt[-1]) if sgt_full else None
+            if sgt_close is None:
+                total = hgt_close
+                lines.append(
+                    f"\nClose: HGT(沪股通)={hgt_close:.2f}亿 "
+                    f"SGT(深股通)=N/A(上游盘中停更) "
+                    f"Total(仅HGT)={total:.2f}亿"
+                )
+            else:
+                total = hgt_close + sgt_close
+                lines.append(
+                    f"\nClose: HGT(沪股通)={hgt_close:.2f}亿 "
+                    f"SGT(深股通)={sgt_close:.2f}亿 "
+                    f"Total={total:.2f}亿"
+                )
             if total > 0:
                 lines.append("Signal: Net northbound INFLOW (bullish)")
             elif total < 0:
@@ -2116,13 +2224,20 @@ def get_northbound_flow(
                 lines.append("\n## Historical Daily Close (local cache, 亿元)")
                 lines.append("Date       | HGT(沪股通) | SGT(深股通) | Total")
                 for date, h, s in history:
-                    lines.append(f"  {date}: HGT={h:.2f} SGT={s:.2f} Total={h + s:.2f}")
-                avg_total = sum(h + s for _, h, s in history) / len(history)
+                    if s != s:  # NaN：深股通缺数据
+                        lines.append(f"  {date}: HGT={h:.2f} SGT=N/A Total={h:.2f}")
+                    else:
+                        lines.append(
+                            f"  {date}: HGT={h:.2f} SGT={s:.2f} Total={h + s:.2f}"
+                        )
+                # 均值口径：深股通缺失（NaN）时仅按 HGT 计，避免 NaN 传染或按 0 低估。
+                totals = [h if s != s else h + s for _, h, s in history]
+                avg_total = sum(totals) / len(totals)
                 lines.append(
                     f"\n{len(history)}-day avg net flow: {avg_total:.2f}亿"
                 )
                 if got_realtime:
-                    today_total = hgt_close + sgt_close
+                    today_total = total
                     diff = today_total - avg_total
                     lines.append(
                         f"Today vs avg: {'+' if diff >= 0 else ''}{diff:.2f}亿 "
@@ -2680,11 +2795,14 @@ def get_industry_comparison(
             "pn": "1",
             "pz": "100",
             "po": "1",
+            # po 只定升降方向，排序字段必须由 fid 指定；缺省时服务端按 f12(代码)
+            # 返回，导致「排名前 N」与涨跌幅无关。显式按 f3(涨跌幅) 降序。
+            "fid": "f3",
             "np": "1",
             "fltt": "2",
             "invt": "2",
             "fs": "m:90+t:2",
-            "fields": "f2,f3,f4,f12,f13,f14,f104,f105,f128,f136,f140,f141,f207",
+            "fields": "f2,f3,f4,f12,f13,f14,f104,f105,f106,f128,f136,f140,f141,f207",
         }
         r = _em_get(url, params=params, timeout=15)
         d = r.json()
@@ -2695,19 +2813,22 @@ def get_industry_comparison(
                 f"\n## 全行业表现 (东财 {len(items)} 个行业)"
             )
             lines.append(
-                "排名 | 行业 | 涨跌幅 | 上涨 | 下跌 | 领涨股"
+                "排名 | 行业 | 涨跌幅 | 上涨 | 下跌 | 平盘 | 领涨股"
             )
             for i, item in enumerate(items):
                 name = item.get("f14", "")
                 change_pct = item.get("f3", 0)
                 up_count = item.get("f104", 0)
                 down_count = item.get("f105", 0)
-                leader = item.get("f140", "")
+                flat_count = item.get("f106", 0)
+                # f128=领涨股名称、f140=领涨股代码；展示用名称，代码兜底。
+                leader = item.get("f128") or item.get("f140") or ""
                 lines.append(
                     f"  {i+1}. {name} "
                     f"| {change_pct}% "
                     f"| {up_count} "
                     f"| {down_count} "
+                    f"| {flat_count} "
                     f"| {leader}"
                 )
                 if i >= top_n * 2 - 1:

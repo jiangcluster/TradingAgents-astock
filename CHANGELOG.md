@@ -6,6 +6,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.22] — 2026-09-06
+
+### Fixed：A 股数据层 P0/P1 采集与计算缺陷（A1–A7）
+
+跨仓库排查（TradingAgents-astock / astock-data / a-share-three-picker）在
+`tradingagents/dataflows/a_stock.py` 定位并修复 7 处缺陷：
+
+- **A1 东财 kline 降级源列序错位（P0）**：`_em_kline_fallback` 按
+  `日期,开,高,低,收,量` 顺序解析，而东财 kline 实际行格式为
+  `日期,开,收,高,低,量`（收盘在 p[2]）；且量单位为「手」未 ×100 转股。
+  导致降级取到的 OHLC 高低价与收盘互换、成交量缩小 100 倍。现按实测列序
+  解析并做 `high>=low`、`high>=max(open,close)` 等不变式校验，不满足的行跳过。
+- **A2 腾讯行情流通市值/总市值互换（P0）**：`_tencent_quote` 把 vals[44]
+  当总市值、vals[45] 当流通市值；经工商银行交叉验证实测 vals[44]=流通市值、
+  vals[45]=总市值。已互换。
+- **A3 市盈率标签错误（P1）**：vals[52] 实为市盈率(动)，原代码标为
+  `pe_static`。重命名为 `pe_dynamic`（已核实全仓库无其他 `pe_static` 消费方）。
+- **A4 财报未来函数（P0）**：`_get_financial_report_sina` 按报告期
+  `period_end` 截断，报告期结束≠已披露（如 2026-06-30 中报 8 月底才披露），
+  回测/实时会读到尚未公开的数据。改按披露日 `publish_date` 过滤，缺失时回退
+  法定披露时限（年报 +4 个月、其余 +3 个月）。
+- **A5 北向资金 sgt 盘中截断误合并（P1）**：同花顺 dayChart 的 `sgt` 序列盘中
+  可能停止更新（长度短于 `times`），原代码直接 zip 合并导致错位。现仅当
+  `len(sgt)==len(times)` 才采信；`_save_northbound_snapshot` 对 sgt 缺失日
+  写 NaN 占位，不再把陈旧值当当日值缓存。
+- **A6 行业对比 clist 参数缺陷（P1）**：`get_industry_comparison` 未传 `fid`
+  排序字段（缺省按 f12 代码排序，"领涨行业"名不副实）；fields 缺 f106 平家数；
+  领涨股名取 f140（实为代码）而非 f128（名称）。现补 `fid:"f3"`、fields 加
+  f106，领涨股改为 `f128 or f140`。
+- **A7 K 线降级链缺腾讯源（P1）**：`_load_ohlcv_astock` / `get_stock_data`
+  降级链原为 mootdx→东财→新浪；东财与新浪同源故障时无兜底。新增
+  `_tencent_kline_fallback`（web.ifzq.gtimg.cn fqkline，行格式
+  `日期,开,收,高,低,量(手)`，920 开头北交所代码加 `bj` 前缀），降级链改为
+  mootdx→东财→腾讯→新浪。
+
+### Tests
+
+- 新增 `tests/test_astock_p0p1_fixes.py`（29 项，全 monkeypatch 无网络）：
+  A1 列序/OHLC 不变式/短行跳过；A7 腾讯 kline 列映射、URL 前缀、bj 前缀、
+  qfqday 缺失降级、日期过滤、空/坏行；降级链（东财空用腾讯、东财正常不调
+  腾讯、错误信息含四源名）；A2/A3 市值与 pe_dynamic；A5 sgt 截断不合入
+  Total、缓存 NaN、历史 NaN 行展示；A6 fid/fields/展示/领涨回退代码。
+- `tests/test_astock_datasrc_fixes.py`：`_sina_payload` 补真实披露节奏
+  publish_date，新增披露日过滤与缺失回退 2 项测试。
+- `tests/test_northbound_cache.py`：新增 sgt=None 写 NaN、不污染其他日 2 项测试。
+
 ## [0.5.21] — 2026-09-05
 
 ### Fixed：深研报告四类数据源缺失（财务三表 / 一致预期 / 资金流行业 / 概念板块）

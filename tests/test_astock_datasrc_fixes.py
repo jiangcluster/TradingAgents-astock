@@ -39,12 +39,15 @@ class FakeResp:
 # ---------------------------------------------------------------------------
 
 def _sina_payload():
-    """按实测 schema 构造：report_list 是 dict，每期 data 是科目条目数组。"""
-    def period(total, profit):
+    """按实测 schema 构造：report_list 是 dict，每期 data 是科目条目数组。
+
+    publish_date 取真实披露节奏：年报次年 4 月、一季报 4 月底、中报 8 月底。
+    """
+    def period(total, profit, publish_date):
         return {
             "rType": "0",
             "rCurrency": "CNY",
-            "publish_date": "20260830",
+            "publish_date": publish_date,
             "data": [
                 {"item_field": "BIZTOTINCO", "item_title": "营业总收入",
                  "item_value": total, "item_source": "lrb"},
@@ -63,9 +66,9 @@ def _sina_payload():
                     {"date_value": "20251231", "date_description": "2025年年报", "date_type": 4},
                 ],
                 "report_list": {
-                    "20260630": period("200.00", "20.00"),
-                    "20260331": period("100.00", "10.00"),
-                    "20251231": period("500.00", "50.00"),
+                    "20260630": period("200.00", "20.00", "20260830"),
+                    "20260331": period("100.00", "10.00", "20260428"),
+                    "20251231": period("500.00", "50.00", "20260420"),
                 },
             }
         }
@@ -118,13 +121,56 @@ def test_sina_sz_prefix_for_non_6_codes(monkeypatch):
 
 
 def test_sina_curr_date_truncates_future_periods(monkeypatch):
-    """复盘历史日期时不得把更晚的报告期喂给模型（未来函数）。"""
+    """复盘历史日期时不得把更晚的报告期喂给模型（未来函数）。
+
+    披露日：年报 2026-04-20、一季报 2026-04-28、中报 2026-08-30。
+    cutoff=2026-04-25 → 只剩年报，一季报/中报均未披露。
+    """
     _patch_sina(monkeypatch)
 
-    df = a_stock._get_financial_report_sina("603613", "利润表", "quarterly", curr_date="2026-03-31")
+    df = a_stock._get_financial_report_sina("603613", "利润表", "quarterly", curr_date="2026-04-25")
 
-    assert list(df.columns) == ["科目", "2026-03-31", "2025-12-31"]
+    assert list(df.columns) == ["科目", "2025-12-31"]
     assert "2026-06-30" not in df.columns
+    assert "2026-03-31" not in df.columns
+
+
+def test_sina_curr_date_filters_by_publish_date_not_period_end(monkeypatch):
+    """A4 核心：报告期截止日 <= cutoff 但尚未披露的期必须剔除。
+
+    cutoff=2026-04-25 时一季报（报告期 03-31 <= cutoff）实际 04-28 才披露，
+    旧逻辑按报告期截止日判断会把它喂给模型 → 未来函数。
+    """
+    _patch_sina(monkeypatch)
+
+    df = a_stock._get_financial_report_sina("603613", "利润表", "quarterly", curr_date="2026-04-25")
+
+    assert list(df.columns) == ["科目", "2025-12-31"]
+    assert "2026-03-31" not in df.columns
+
+    # 披露日一过（04-28）即放行
+    df2 = a_stock._get_financial_report_sina("603613", "利润表", "quarterly", curr_date="2026-05-06")
+
+    assert list(df2.columns) == ["科目", "2026-03-31", "2025-12-31"]
+
+
+def test_sina_missing_publish_date_falls_back_to_legal_lag(monkeypatch):
+    """publish_date 缺失/空时回退法定最晚披露滞后：年报 +4 个月、其余 +3 个月。"""
+    payload = _sina_payload()
+    rl = payload["result"]["data"]["report_list"]
+    rl["20260331"].pop("publish_date")      # 缺失 → 03-31 + 3 月 = 06-30
+    rl["20251231"]["publish_date"] = ""     # 空串 → 12-31 + 4 月 = 次年 04-30
+    _patch_sina(monkeypatch, payload=payload)
+
+    # cutoff=2026-06-01：一季报回退披露日 06-30 > cutoff → 剔除；年报 04-30 已过 → 保留
+    df = a_stock._get_financial_report_sina("603613", "利润表", "quarterly", curr_date="2026-06-01")
+
+    assert list(df.columns) == ["科目", "2025-12-31"]
+
+    # cutoff=2026-07-01：一季报回退披露日 06-30 <= cutoff → 放行
+    df2 = a_stock._get_financial_report_sina("603613", "利润表", "quarterly", curr_date="2026-07-01")
+
+    assert list(df2.columns) == ["科目", "2026-03-31", "2025-12-31"]
 
 
 def test_sina_annual_keeps_only_december_periods(monkeypatch):
