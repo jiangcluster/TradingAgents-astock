@@ -21,6 +21,7 @@ import contextlib
 import json as _json
 import os
 import logging
+from io import StringIO
 import math
 import random
 import re as _re
@@ -28,6 +29,7 @@ import socket
 import time
 import uuid
 import urllib.request
+from urllib.parse import urlsplit
 
 import pandas as pd
 import requests as _requests
@@ -548,21 +550,64 @@ _EM_SESSION.headers.update({"User-Agent": _UA})
 _EM_MIN_INTERVAL = float(os.environ.get("EM_MIN_INTERVAL", "1.0"))
 _em_last_call = [0.0]  # 模块级上次东财请求时间戳
 
+# push2 / push2his 主站在部分机房会被间歇性断连（RemoteDisconnected /
+# ConnectionReset），而同源镜像 push2delay.eastmoney.com 实测稳定（K 线
+# _em_kline_fallback、clist、fflow/kline 均已验证）。仅对这两个高频断连的
+# 主机做镜像降级；datacenter / search-api-web 等不在表内，行为不变。
+_EM_MIRROR = {
+    "push2.eastmoney.com": "push2delay.eastmoney.com",
+    "push2his.eastmoney.com": "push2delay.eastmoney.com",
+}
+
 
 def _em_get(url, params=None, headers=None, timeout=15, **kwargs):
-    """东财统一请求入口：自动节流 + 复用 session + 默认 UA。
+    """东财统一请求入口：自动节流 + 复用 session + 默认 UA + 主站断连镜像降级。
 
     所有 eastmoney.com 接口都应通过它请求，避免多 Agent 高频拉数据被封 IP。
     串行限流：与上次东财请求间隔 < EM_MIN_INTERVAL 时 sleep 补足 + 0.1~0.5s 随机抖动。
     传入的 headers 会覆盖 session 默认 UA（用于保留各端点自己的 Referer/Origin）。
+    push2 / push2his 主站连接失败或返回 4xx/5xx 时，自动用 push2delay 镜像重试一次。
     """
     wait = _EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
     if wait > 0:
         time.sleep(wait + random.uniform(0.1, 0.5))
+
+    host = (urlsplit(url).hostname or "").lower()
+    mirror_host = _EM_MIRROR.get(host)
+    candidates = [url]
+    if mirror_host:
+        candidates.append(url.replace(host, mirror_host, 1))
+
     try:
-        return _EM_SESSION.get(
-            url, params=params, headers=headers, timeout=timeout, **kwargs
-        )
+        last_resp = None
+        for idx, cand in enumerate(candidates):
+            has_next = idx + 1 < len(candidates)
+            try:
+                resp = _EM_SESSION.get(
+                    cand, params=params, headers=headers, timeout=timeout, **kwargs
+                )
+            except (
+                _requests.exceptions.ConnectionError,
+                _requests.exceptions.Timeout,
+            ) as e:
+                if has_next:
+                    logger.warning(
+                        "eastmoney %s failed (%s), fallback to mirror %s",
+                        host, type(e).__name__, mirror_host,
+                    )
+                    continue
+                raise
+            last_resp = resp
+            if resp.status_code < 400:
+                return resp
+            if has_next:
+                logger.warning(
+                    "eastmoney %s HTTP %s, fallback to mirror %s",
+                    host, resp.status_code, mirror_host,
+                )
+                continue
+            return resp
+        return last_resp  # pragma: no cover - 循环必返回或抛出
     finally:
         _em_last_call[0] = time.time()
 
@@ -611,7 +656,13 @@ def _ths_eps_forecast(code: str) -> pd.DataFrame:
     }
     r = _requests.get(url, headers=headers, timeout=15)
     r.encoding = "gbk"
-    dfs = pd.read_html(r.text)
+    # pandas 2.1+ 起 read_html 不再接受 HTML 字符串（会当文件路径 open，抛
+    # FileNotFoundError）；必须包 StringIO。同花顺页面偶发无表格时 read_html
+    # 抛 ValueError，按"无覆盖"处理。
+    try:
+        dfs = pd.read_html(StringIO(r.text))
+    except ValueError:
+        return pd.DataFrame()
     # Find the table containing EPS data
     for df in dfs:
         cols = [str(c) for c in df.columns]
@@ -1237,6 +1288,19 @@ def _get_financial_report_sina(
     """Shared helper: fetch financial report via Sina direct HTTP API.
 
     report_type: '资产负债表' | '利润表' | '现金流量表'
+
+    Sina getFinanceReport2022 schema (实测 2026-09):
+      result.data = {
+        report_count, report_date: [{date_value, date_description, date_type}],
+        report_list: {
+          "<YYYYMMDD>": {
+            rType, rCurrency, publish_date, ...,
+            data: [{item_field, item_title, item_value, item_tongbi, ...}, ...]
+          }, ...
+        }
+      }
+    即每个报告期是 report_list 的一个 key，其 ``data`` 是该期的科目条目数组。
+    输出 DataFrame：行=科目(item_title)，列=各报告期(YYYY-MM-DD)，值=item_value。
     """
     _report_type_map = {
         "资产负债表": "fzb",
@@ -1255,28 +1319,82 @@ def _get_financial_report_sina(
         "page": "1",
         "num": "20",
     }
-    r = _requests.get(url, params=params, headers={"User-Agent": _UA}, timeout=15)
-    d = r.json()
-
-    result = d.get("result", {}).get("data", {})
-    items = result.get(source_type, [])
-    if not isinstance(items, list) or not items:
+    # Sina 偶发 ConnectionReset（实测 zcfzb/llb 会随机被重置）；重试 ≤2 次，间隔递增。
+    resp = None
+    for attempt in range(2):
+        try:
+            resp = _requests.get(
+                url, params=params, headers={"User-Agent": _UA}, timeout=20
+            )
+            break
+        except (_requests.exceptions.ConnectionError, _requests.exceptions.Timeout) as e:
+            if attempt == 1:
+                logger.warning("Sina financial report failed for %s: %s", code, e)
+                return pd.DataFrame()
+            time.sleep(1.0)
+    if resp is None:
         return pd.DataFrame()
 
-    df = pd.DataFrame(items)
+    d = resp.json()
+    data = (d.get("result") or {}).get("data") or {}
+    report_list = data.get("report_list") or {}
+    if not isinstance(report_list, dict) or not report_list:
+        return pd.DataFrame()
 
-    # Filter by curr_date
-    if curr_date and "报告日" in df.columns:
-        df["报告日"] = pd.to_datetime(df["报告日"], errors="coerce")
-        cutoff = pd.to_datetime(curr_date)
-        df = df[df["报告日"] <= cutoff]
+    # 报告期 key 为 YYYYMMDD，按日期倒序；先按 curr_date / annual 过滤。
+    cutoff = pd.to_datetime(curr_date) if curr_date else None
+    periods = []
+    for key in sorted(report_list.keys(), reverse=True):
+        pk = str(key).strip()
+        if len(pk) != 8 or not pk.isdigit():
+            continue
+        period_dt = pd.to_datetime(pk, format="%Y%m%d", errors="coerce")
+        if period_dt is pd.NaT:
+            continue
+        if cutoff is not None and period_dt > cutoff:
+            continue
+        if freq.lower() == "annual" and pk[4:6] != "12":
+            continue
+        periods.append((pk, period_dt))
 
-    # Filter by frequency (annual = month 12 reports only)
-    if freq.lower() == "annual" and "报告日" in df.columns:
-        months = pd.to_datetime(df["报告日"], errors="coerce").dt.month
-        df = df[months == 12]
+    # 最多保留 8 个报告期作为列（与原 head(8) 语义一致）。
+    periods = periods[:8]
+    if not periods:
+        return pd.DataFrame()
 
-    return df.head(8)
+    # 组装：科目为行，报告期为列。科目顺序以第一个（最新）报告期的 data 顺序为准。
+    col_labels = [f"{pk[:4]}-{pk[4:6]}-{pk[6:]}" for pk, _ in periods]
+    ordered_titles: list[str] = []
+    title_index: dict[str, int] = {}
+    table: dict[str, list] = {}  # title -> [values per period]
+
+    for col_i, (pk, _) in enumerate(periods):
+        entry = report_list.get(pk) or {}
+        items = entry.get("data") or []
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("item_title") or item.get("item_field") or "").strip()
+            if not title:
+                continue
+            if title not in title_index:
+                title_index[title] = len(ordered_titles)
+                ordered_titles.append(title)
+                table[title] = [None] * len(periods)
+            table[title][col_i] = item.get("item_value")
+
+    if not ordered_titles:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(
+        {"科目": ordered_titles}
+    )
+    for col_i, label in enumerate(col_labels):
+        df[label] = [table[t][col_i] for t in ordered_titles]
+
+    return df
 
 
 def get_balance_sheet(
@@ -2049,6 +2167,55 @@ _BAIDU_PAE_HEADERS = {
 # ---- 13. get_concept_blocks ----
 
 
+def _em_concept_blocks(code: str) -> str:
+    """东财 push2 slist(spt=3) 个股所属板块，百度股市通 403 时的降级源。
+
+    spt=3 返回个股所属的全部板块（BKxxxx + 名称 + 当日涨跌幅），行业/概念/
+    地域混合、不区分类别（百度按类别分组，此处降级为扁平列表）。经 _em_get
+    自动 push2→push2delay 镜像降级。取不到时返回空串，由调用方决定回退文案。
+    """
+    secid = f"1.{code}" if code.startswith("6") else f"0.{code}"
+    url = "https://push2.eastmoney.com/api/qt/slist/get"
+    params = {
+        "spt": "3",
+        "fields": "f12,f14,f3",
+        "secid": secid,
+        "pi": "0",
+        "pz": "100",
+        "po": "1",
+        "invt": "2",
+        "fltt": "2",
+    }
+    r = _em_get(url, params=params, timeout=12)
+    d = r.json()
+    diff = (d.get("data") or {}).get("diff") or {}
+    blocks = list(diff.values()) if isinstance(diff, dict) else diff
+    blocks = [b for b in blocks if isinstance(b, dict) and b.get("f14")]
+    if not blocks:
+        return ""
+
+    lines = [
+        f"# Concept & Sector Blocks for {code} (A-stock)",
+        "# Source: 东方财富 push2 (Eastmoney, 百度降级)",
+        f"# Retrieved: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        "",
+        "## 所属板块 (行业/概念/地域)",
+    ]
+    names: list[str] = []
+    for b in blocks:
+        name = str(b.get("f14", ""))
+        chg = b.get("f3", "")
+        try:
+            chg_str = f"{float(chg):+.2f}%"
+        except (TypeError, ValueError):
+            chg_str = str(chg)
+        lines.append(f"  {name}: {chg_str}")
+        names.append(name)
+    if names:
+        lines.append(f"\nBlock tags: {' / '.join(names)}")
+    return "\n".join(lines)
+
+
 def get_concept_blocks(
     ticker: Annotated[str, "A-stock code (e.g. 688017)"],
 ) -> str:
@@ -2071,6 +2238,10 @@ def get_concept_blocks(
         d = r.json()
 
         if str(d.get("ResultCode", -1)) != "0":
+            # 百度 PAE 反爬（403/ResultCode 异常）→ 东财 slist 降级
+            em = _em_concept_blocks(code)
+            if em:
+                return em
             return (
                 f"Baidu PAE error: ResultCode={d.get('ResultCode')} "
                 f"{d.get('ResultMsg', '')}"
@@ -2079,6 +2250,9 @@ def get_concept_blocks(
         result = d.get("Result", {})
         categories = result.get(code, [])
         if not categories:
+            em = _em_concept_blocks(code)
+            if em:
+                return em
             return f"No concept/block data for {code}"
 
         lines = [
@@ -2111,6 +2285,11 @@ def get_concept_blocks(
         return "\n".join(lines)
 
     except Exception as e:
+        # 百度整体失败（403 非 JSON / 网络异常）→ 东财 slist 降级
+        with contextlib.suppress(Exception):
+            em = _em_concept_blocks(code)
+            if em:
+                return em
         return f"Error fetching concept blocks for {code}: {str(e)}"
 
 

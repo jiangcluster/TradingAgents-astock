@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.21] — 2026-09-05
+
+### Fixed：深研报告四类数据源缺失（财务三表 / 一致预期 / 资金流行业 / 概念板块）
+
+下游 a-share-deep-advisor 深研报告出现部分数据源缺失，逐一定性并修复：
+
+- **财务三表恒空（BUG）**：`_get_financial_report_sina` 误按旧 schema 取
+  `data[source_type]` 当 list，而 Sina `getFinanceReport2022` 实测返回
+  `data.report_list` 为 `{报告期: {rType, publish_date, data:[科目条目]}}` 的
+  dict（HTTP 200 但解析 0 条）。改按 `report_list` 解析：行=科目 `item_title`、
+  列=各报告期（`YYYY-MM-DD` 倒序）、值=`item_value`；保留 `curr_date` 截断
+  （未来函数防护）、`annual` 只留 12 月期、最多 8 期上限；并加最多 2 次重试
+  兜 Sina 偶发 10054 连接重置。
+- **一致预期抛异常（BUG）**：`_ths_eps_forecast` / `get_profit_forecast` 在
+  pandas 3.x 下 `pd.read_html(html_str)` 把 HTML 字符串当文件路径 `open` →
+  `FileNotFoundError`。改为 `pd.read_html(io.StringIO(html))`，无表格时捕获
+  `ValueError` 返回空。
+- **资金流 / 行业断连（网络降级）**：`_em_get` 对 `push2` / `push2his` 主站
+  间歇断连（ConnectionError / Timeout / 5xx）降级到 `push2delay` 镜像；非
+  push2 主机不换、镜像也失败则返回 `last_resp`，保持既有限流时间戳更新。
+- **概念板块 403（降级）**：`get_concept_blocks` 在百度股市通 403 / 非零
+  `ResultCode` / 空结果时降级到东财 `slist(spt=3)`（新增 `_em_concept_blocks`
+  helper，输出 `名称: +x.xx%` + `Block tags:`）；百度健康时仍优先百度，降级
+  异常吞掉不影响主流程。
+
+### Tests
+
+- `tests/test_astock_datasrc_fixes.py`（新增，41 用例，全 monkeypatch 无网络）：
+  覆盖三表 `report_list` 解析 / source 映射 / curr_date 截断 / annual 过滤 /
+  8 期上限 / 畸形与旧 schema 返回空 / 10054 重试；read_html StringIO 解析 /
+  无表格返回空；`_em_get` 断连/超时/5xx 走镜像、主站正常不走、双挂抛异常、
+  非 push2 不换；`_em_concept_blocks` 解析与 403/空/非零降级、百度优先、
+  降级异常吞掉。全量回归 423 passed / 13 skipped。
+
 ## [0.5.20] — 2026-09-05
 
 ### Fixed：北向资金缓存原子写（多票并行深析场景的共享写盘竞争修复）
