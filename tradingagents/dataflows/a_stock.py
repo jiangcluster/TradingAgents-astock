@@ -645,6 +645,98 @@ def _eastmoney_datacenter(
     return []
 
 
+def _fmt_int(value) -> str:
+    try:
+        return f"{int(float(value)):,}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_num(value, digits: int = 2) -> str:
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_wan(value) -> str:
+    """元 → 万元（资金流字段渲染）。"""
+    try:
+        return f"{float(value) / 1e4:.0f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+# 股东数据回退所用的东财 datacenter 报表（列已按线上实测响应命名）。
+# mootdx F10 走通达信 TCP 协议，本网络下协议握手被拒；datacenter 为 HTTPS，
+# 与龙虎榜（RPT_DAILYBILLBOARD_DETAILSNEW）/解禁（RPT_LIFT_STAGE）同源可用。
+_HOLDER_REPORTS = (
+    ("十大流通股东", "RPT_F10_EH_FREEHOLDERS", "FREE_HOLDNUM_RATIO", "占流通%"),
+    ("十大股东", "RPT_F10_EH_HOLDERS", "HOLD_NUM_RATIO", "占比%"),
+)
+
+
+def _datacenter_holder_sections(code: str) -> list:
+    """东财 datacenter 的股东维度数据（十大股东/流通股东/增减持/户数）。空列表=无数据。"""
+    lines: list = []
+
+    for title, report, ratio_col, ratio_label in _HOLDER_REPORTS:
+        rows = _eastmoney_datacenter(
+            report,
+            columns=("HOLDER_RANK,HOLDER_NAME,HOLD_NUM,HOLD_NUM_CHANGE,"
+                     f"END_DATE,{ratio_col}"),
+            filter_str=f'(SECURITY_CODE="{code}")',
+            page_size=30,
+            sort_columns="END_DATE",
+            sort_types="-1",
+        )
+        if not rows:
+            continue
+        latest = max(str(r.get("END_DATE") or "") for r in rows)
+        period_rows = [r for r in rows if str(r.get("END_DATE") or "") == latest]
+        period_rows.sort(key=lambda r: r.get("HOLDER_RANK") or 99)
+        lines.append(f"\n## {title}（报告期 {latest[:10]}）")
+        lines.append(f"排名 | 股东 | 持股(股) | {ratio_label} | 较上期变动")
+        for r in period_rows[:10]:
+            lines.append(
+                f"  {r.get('HOLDER_RANK')} | {r.get('HOLDER_NAME')} | "
+                f"{_fmt_int(r.get('HOLD_NUM'))} | {_fmt_num(r.get(ratio_col))} | "
+                f"{r.get('HOLD_NUM_CHANGE') or '—'}"
+            )
+
+    num_rows = _eastmoney_datacenter(
+        "RPT_HOLDERNUMLATEST", columns="ALL",
+        filter_str=f'(SECURITY_CODE="{code}")', page_size=5,
+    )
+    if num_rows:
+        r = num_rows[0]
+        lines.append(f"\n## 股东户数（报告期 {str(r.get('END_DATE') or '')[:10]}）")
+        lines.append(
+            f"  户数 {_fmt_int(r.get('HOLDER_NUM'))}（上期 "
+            f"{_fmt_int(r.get('PRE_HOLDER_NUM'))}，变动 "
+            f"{_fmt_int(r.get('HOLDER_NUM_CHANGE'))} 户 / "
+            f"{_fmt_num(r.get('HOLDER_NUM_RATIO'))}%）；户均持股 "
+            f"{_fmt_num(r.get('AVG_HOLD_NUM'), 0)} 股"
+        )
+
+    trade_rows = _eastmoney_datacenter(
+        "RPT_SHARE_HOLDER_INCREASE", columns="ALL",
+        filter_str=f'(SECURITY_CODE="{code}")', page_size=10,
+        sort_columns="NOTICE_DATE", sort_types="-1",
+    )
+    if trade_rows:
+        lines.append("\n## 大股东增减持（最近公告）")
+        lines.append("公告日 | 股东 | 方向 | 变动(万股) | 持股比例% | 交易均价")
+        for r in trade_rows[:10]:
+            lines.append(
+                f"  {str(r.get('NOTICE_DATE') or '')[:10]} | {r.get('HOLDER_NAME')} | "
+                f"{r.get('DIRECTION') or '—'} | {_fmt_num(r.get('CHANGE_NUM'))} | "
+                f"{_fmt_num(r.get('HOLD_RATIO'))} | {_fmt_num(r.get('TRADE_AVERAGE_PRICE'))}"
+            )
+
+    return lines
+
+
 # ---------------------------------------------------------------------------
 # 同花顺 EPS forecast helper (direct HTTP, no akshare)
 # ---------------------------------------------------------------------------
@@ -1843,12 +1935,32 @@ def get_global_news(
 def get_insider_transactions(
     ticker: Annotated[str, "A-stock code"],
 ) -> str:
-    """Get shareholder/insider activity via mootdx F10.
+    """Get shareholder/insider activity for an A-stock.
 
-    Note: A-stock insider transaction data differs from US markets.
-    Uses mootdx F10 shareholder research as the closest equivalent.
+    数据源顺序：**东财 datacenter 优先**（结构化：十大流通股东/十大股东/大股东增减持/
+    股东户数）→ 回退 mootdx F10「股东研究」文本（原实现）。
+
+    动因（2026-09-11 排查）：mootdx 走通达信 TCP 7709 协议，本网络下 14 台服务器
+    "端口能连上但协议握手/取数被拒"，原实现无回退 → 游资追踪师与解禁监控师各出现
+    「内部人交易数据缺失/接口不可用」、「前十大股东完整明细缺失」。datacenter 为 HTTPS，
+    与龙虎榜/解禁同源且线上实测可用（RPT_F10_EH_HOLDERS / RPT_F10_EH_FREEHOLDERS /
+    RPT_SHARE_HOLDER_INCREASE / RPT_HOLDERNUMLATEST 均返回真实数据）。
     """
     code = _normalize_ticker(ticker)
+
+    try:
+        sections = _datacenter_holder_sections(code)
+    except Exception as e:  # noqa: BLE001 - 回退链任一环失败都不应让工具整体失败
+        logger.warning("datacenter holder fallback failed for %s: %s", code, e)
+        sections = []
+    if sections:
+        header = f"# Shareholder Research for {code} (A-stock)\n"
+        header += "# Note: A-stock equivalent of insider transactions\n"
+        header += "# Data source: 东财 datacenter（mootdx F10 不可用时的回退）\n"
+        header += (
+            f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        )
+        return header + "\n".join(sections)
 
     try:
         text = _mootdx_call("F10", symbol=code, name="股东研究")
@@ -2403,6 +2515,97 @@ def get_concept_blocks(
 # ---- 14. get_fund_flow ----
 
 
+_FUND_FLOW_COLUMNS = ["date", "code", "main", "large", "mid", "small", "super"]
+
+
+def _fund_flow_cache_path() -> str:
+    """本地逐日资金流累积缓存（CSV，位于 data_cache_dir）。
+
+    动因（2026-09-11 排查）：历史资金流原走 push2his，而本网络下 push2 与 push2his
+    被**主机级拦截**（实测 RemoteDisconnected，改 UA/Referer 无效），TA 的镜像降级
+    push2delay 对历史接口**无能力**（实测 daykline 仅返回当日 1 行、kline 返回 0 行），
+    东财 datacenter 亦无对应资金流报表 → 20 日窗口只能靠本地逐日累积（"自给"）。
+    """
+    from .config import get_config
+
+    cache_dir = get_config().get(
+        "data_cache_dir", os.path.expanduser("~/.tradingagents/cache")
+    )
+    os.makedirs(cache_dir, exist_ok=True)
+    return os.path.join(cache_dir, "fund_flow_daily.csv")
+
+
+def _save_fund_flow_snapshot(date_str: str, code: str, values: dict) -> None:
+    """按 (date, code) 去重写入本地缓存；原子替换（多票并行深析的并发安全）。
+
+    缺字段写 ``nan`` 占位而不是 0，避免把「没取到」伪装成「净流入 0」。
+    """
+    import csv
+    import tempfile
+
+    path = _fund_flow_cache_path()
+    existing: dict = {}
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            next(reader, None)
+            for row in reader:
+                if len(row) >= len(_FUND_FLOW_COLUMNS):
+                    existing[(row[0], row[1])] = row[: len(_FUND_FLOW_COLUMNS)]
+    key = (str(date_str)[:10], str(code))
+    row = [key[0], key[1]]
+    for col in _FUND_FLOW_COLUMNS[2:]:
+        try:
+            row.append("nan" if values.get(col) is None else f"{float(values[col]):.0f}")
+        except (TypeError, ValueError):
+            row.append("nan")
+    existing[key] = row
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".fundflow_", suffix=".tmp", dir=os.path.dirname(path)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(_FUND_FLOW_COLUMNS)
+            for k in sorted(existing):
+                writer.writerow(existing[k])
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _load_fund_flow_history(code: str, n: int = 20, cutoff: str = "") -> list:
+    """读本地累积缓存 → ``[{date, main, large, mid, small, super}]``（升序，最近 n 条）。"""
+    import csv
+
+    path = _fund_flow_cache_path()
+    if not os.path.exists(path):
+        return []
+    rows: list = []
+    with open(path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        next(reader, None)
+        for row in reader:
+            if len(row) < len(_FUND_FLOW_COLUMNS) or row[1] != str(code):
+                continue
+            date_str = row[0][:10]
+            if cutoff and date_str > cutoff:
+                continue
+            item = {"date": date_str}
+            for col, raw in zip(_FUND_FLOW_COLUMNS[2:], row[2:]):
+                try:
+                    item[col] = None if raw == "nan" else float(raw)
+                except ValueError:
+                    item[col] = None
+            rows.append(item)
+    rows.sort(key=lambda r: r["date"])
+    return rows[-n:]
+
+
 def get_fund_flow(
     ticker: Annotated[str, "A-stock code"],
     curr_date: Annotated[str, "Date YYYY-MM-DD"],
@@ -2478,12 +2681,31 @@ def get_fund_flow(
                     lines.append(
                         "Signal: Net main force OUTFLOW (bearish)"
                     )
+            if len(last_parts) >= 6:
+                # 逐日累积到本地缓存：外部历史接口在本网络不可用（见 _fund_flow_cache_path），
+                # 这是 20 日窗口的唯一来源。写失败只告警，不影响本次返回。
+                try:
+                    _save_fund_flow_snapshot(
+                        str(_market_today()),
+                        code,
+                        {
+                            "main": last_parts[1],
+                            "small": last_parts[2],
+                            "mid": last_parts[3],
+                            "large": last_parts[4],
+                            "super": last_parts[5],
+                        },
+                    )
+                except Exception as save_err:  # noqa: BLE001
+                    logger.warning(
+                        "fund flow cache write failed for %s: %s", code, save_err
+                    )
         else:
             lines.append(
                 "No realtime fund flow (non-trading hours or holiday)"
             )
 
-        # Historical daily fund flow (push2his)
+        # Historical daily fund flow：外部接口（push2his）+ 本地累积缓存合并
         if include_history:
             url_hist = (
                 "https://push2his.eastmoney.com"
@@ -2504,51 +2726,75 @@ def get_fund_flow(
                 "fields1": "f1,f2,f3,f7",
                 "fields2": "f51,f52,f53,f54,f55,f56,f57",
             }
-            rh = _em_get(url_hist, params=params_hist, timeout=10)
-            dh = rh.json()
-            hist_klines = dh.get("data", {}).get("klines", [])
 
-            # 逐行按分析日截断：接口返回的是"从今天回溯 20 个交易日"，
-            # 在历史日期上直接打印等于把未来的资金流喂给模型（未来函数）。
-            if historical:
-                cutoff = str(curr_date)[:10]
-                hist_klines = [
-                    k for k in hist_klines if k.split(",")[0][:10] <= cutoff
-                ]
-                # 窗口是为了"够回溯到分析日"才放大的，过滤完要裁回承诺的 20 个交易日。
-                # 不裁的话，复盘 90 天前会返回约 40 行——既改变了请求的趋势窗口，
-                # 又把每次情绪工具的返回体撑大一倍。
-                hist_klines = hist_klines[-20:]
-
-            if historical and not hist_klines:
-                # 说清楚是"这个日期取不到"，而不是让正文里凭空少一段
-                lines.append(
-                    f"\n## Historical Daily Fund Flow\n"
-                    f"（{str(curr_date)[:10]} 及之前的资金流未能取到：该接口只提供"
-                    f"从今天回溯的窗口，分析日过早时可能已超出可回溯范围。）"
+            cutoff = str(curr_date)[:10] if historical else ""
+            external: dict = {}
+            try:
+                rh = _em_get(url_hist, params=params_hist, timeout=10)
+                for k in (rh.json().get("data") or {}).get("klines") or []:
+                    parts = k.split(",")
+                    if len(parts) >= 6:
+                        external[parts[0][:10]] = parts
+            except Exception as hist_err:  # noqa: BLE001
+                logger.warning(
+                    "fund flow history fetch failed for %s: %s", code, hist_err
                 )
-            elif hist_klines:
+            if cutoff:
+                # 逐行按分析日截断：接口返回"从今天回溯"，在历史日期上直接打印
+                # 等于把未来的资金流喂给模型（未来函数）。
+                external = {d: v for d, v in external.items() if d <= cutoff}
+
+            # 本地累积缓存：外部历史接口在本网络不可用时的唯一来源；外部行优先。
+            local_rows = _load_fund_flow_history(code, n=60, cutoff=cutoff)
+            merged: dict = {
+                r["date"]: [r["date"], r["main"], r["small"], r["mid"],
+                            r["large"], r["super"]]
+                for r in local_rows
+            }
+            merged.update(external)
+            series = [merged[d] for d in sorted(merged)][-20:]
+
+            if series:
                 lines.append(
                     f"\n## Historical Daily Fund Flow "
-                    f"(last {len(hist_klines)} trading days"
-                    + (f", 截至 {str(curr_date)[:10]}" if historical else "")
+                    f"(last {len(series)} trading days"
+                    + (f", 截至 {cutoff}" if cutoff else "")
                     + ")"
                 )
                 lines.append(
                     "Date | 主力净流入(万) | 大单(万) "
                     "| 中单(万) | 小单(万) | 超大单(万)"
                 )
-                for line in hist_klines:
-                    parts = line.split(",")
-                    if len(parts) >= 6:
-                        lines.append(
-                            f"  {parts[0]} "
-                            f"| main={float(parts[1])/1e4:.0f} "
-                            f"| large={float(parts[4])/1e4:.0f} "
-                            f"| mid={float(parts[3])/1e4:.0f} "
-                            f"| small={float(parts[2])/1e4:.0f} "
-                            f"| super={float(parts[5])/1e4:.0f}"
-                        )
+                for parts in series:
+                    lines.append(
+                        f"  {str(parts[0])[:10]} "
+                        f"| main={_fmt_wan(parts[1])} "
+                        f"| large={_fmt_wan(parts[4])} "
+                        f"| mid={_fmt_wan(parts[3])} "
+                        f"| small={_fmt_wan(parts[2])} "
+                        f"| super={_fmt_wan(parts[5])}"
+                    )
+                if len(series) < 20:
+                    # 不再让"降级成功但只有 1 行"冒充正常的 20 日窗口（原实现静默
+                    # 输出 "last 1 trading days"，读起来像"就只有 1 天数据"）。
+                    lines.append(
+                        f"\n注意：外部历史接口不可用或未覆盖（本网络下 push2his 被"
+                        f"主机级拦截，降级镜像 push2delay 对历史接口无能力，仅当日 1 行）。"
+                        f"当前 {len(series)} 天 = 本地累积缓存 {len(local_rows)} 天 + "
+                        f"外部 {len(external)} 天；本地缓存逐日累积，将逐步补齐 20 日窗口。"
+                        f"趋势判断请以现有天数为限。"
+                    )
+            elif historical:
+                # 说清楚是"这个日期取不到"，而不是让正文里凭空少一段
+                lines.append(
+                    f"\n## Historical Daily Fund Flow\n"
+                    f"（{cutoff} 及之前的资金流未能取到：外部接口只提供从今天回溯的"
+                    f"窗口，分析日过早时可能已超出可回溯范围；本地缓存亦无该段记录。）"
+                )
+            else:
+                lines.append(
+                    "\n## Historical Daily Fund Flow\n（暂无数据）"
+                )
 
         return "\n".join(lines)
 

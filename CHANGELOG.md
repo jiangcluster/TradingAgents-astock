@@ -6,6 +6,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.23] — 2026-09-11
+
+### Fixed：股东数据无回退 + 资金流历史静默降级（深研报告数据缺失排查）
+
+跨仓库排查（a-share-deep-advisor 深研报告「数据质量门控」大面积 C 级）定位到
+`tradingagents/dataflows/a_stock.py` 两处问题：
+
+- **股东/内部人数据无回退（P1）**：`get_insider_transactions` 仅走 mootdx F10
+  「股东研究」，而 mootdx 依赖通达信 TCP 7709 协议——本网络下 14 台服务器
+  「端口能连上但协议握手/取数被拒」（实测换服务器无效，探针亦确认协议层被拒），
+  原实现直接返回错误串 → 游资追踪师报「内幕人交易数据缺失」、解禁监控师报
+  「内部人交易明细缺失（接口不可用）」+「前十大股东完整明细缺失」。
+  - 现改为**东财 datacenter 优先**（HTTPS，与龙虎榜/解禁同源）：十大流通股东
+    `RPT_F10_EH_FREEHOLDERS`、十大股东 `RPT_F10_EH_HOLDERS`、大股东增减持
+    `RPT_SHARE_HOLDER_INCREASE`、股东户数 `RPT_HOLDERNUMLATEST`（四报表线上实测
+    均返回真实数据），输出结构化表并标注来源；datacenter 无数据或抛异常时回退原
+    mootdx 路径（行为不变）。
+- **资金流历史静默降级（P1）**：20 日历史资金流走 `push2his`，本网络下
+  `push2` / `push2his` 被**主机级拦截**（实测 `RemoteDisconnected`，改 UA/Referer 无效），
+  `_EM_MIRROR` 降级到 `push2delay` 后该接口**只返回当日 1 行**（实测 daykline=1 行、
+  kline=0 行），原实现把它照常渲染成 `Historical Daily Fund Flow (last 1 trading days)`
+  ——读起来像「本就只有 1 天」，看不出是降级。
+  - 新增**本地逐日累积缓存** `fund_flow_daily.csv`（位于 `data_cache_dir`，按
+    `(date, code)` 去重、原子替换、缺字段写 `nan` 占位），每次非复盘调用把当日
+    主力/大单/中单/小单/超大单净流入落盘；
+  - 历史段改为**外部行 ∪ 本地缓存**合并（外部优先，按分析日截断防未来函数），
+    不足 20 天时输出明确的降级说明（天数构成 + push2his 被拦原因 + 本地累积中）。
+
+### Tests
+- 新增 `tests/test_astock_holder_fallback.py`（5 例）：datacenter 渲染（最新报告期 /
+  排名排序 / 千分位 / 户数 / 增减持）、无数据返回空、datacenter 优先且不触碰 mootdx、
+  空数据回退 mootdx、datacenter 抛异常仍回退。
+- 新增 `tests/test_astock_fund_flow_cache.py`（8 例）：缓存排序/去重/`nan` 占位、
+  原子替换无残留、按 code/cutoff/n 过滤、缓存缺失、外部历史挂掉仍输出本地历史、
+  当日快照落盘、复盘截断不含未来行、降级说明文案。
+- `tests/conftest.py` 新增 autouse fixture `_isolated_local_caches`：把
+  `_fund_flow_cache_path` / `_northbound_cache_path` 重定向到 `tmp_path`，避免测试
+  写入开发者真实缓存（此前会残留 `.fundflow_*.tmp`）。
+
+### 备注
+- **根治仍需运维放行 `push2.eastmoney.com` / `push2his.eastmoney.com`**：实测 TCP 443
+  可达但 HTTP 请求被立即断开（应用层拦截，非路由/端口问题），改 UA 无效。放行后外部
+  历史自动恢复，本地缓存退化为兜底；当前网络下 20 日窗口需本地累积约 20 个交易日。
+
 ## [0.5.22] — 2026-09-06
 
 ### Fixed：A 股数据层 P0/P1 采集与计算缺陷（A1–A7）
