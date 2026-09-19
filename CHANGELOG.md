@@ -114,6 +114,13 @@ Breaking changes within the 0.x line are called out explicitly.
 
 全量：512 passed / 13 skipped。
 
+### Docs
+
+- `CLAUDE.md`：未来函数防护一节补 v0.5.25 的覆盖面（三个共用工具、5 个新工具、财报
+  `curr_date` 必填的静默失败）；新增「共享缓存并发」一节（`_atomic_write` /
+  `_cache_lock` / `_market_today` 的使用约束）；新增「质量门控的作用域与降级」一节
+  （`selected_analysts` 契约、复审没跑必须说出来）。
+
 ## [0.5.24] — 2026-09-18
 
 ### Changed：风险辩论／PM 终裁的评级校准（修复"结构性约束吞掉买入评级"）
