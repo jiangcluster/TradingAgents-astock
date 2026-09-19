@@ -11,6 +11,13 @@ DEFAULT_CONFIG = {
     # the oldest resolved entries are pruned once this limit is exceeded.
     # Pending entries are never pruned. None disables rotation entirely.
     "memory_log_max_entries": None,
+    # 记忆结算的持有窗口与最低结算门槛（单位：交易日）。
+    # 结算口径的历史问题：原先只要拿到 ≥2 行行情就结算，昨天做的决策今天再跑同一只票
+    # 会用 1 日收益冒充持有期收益，反思与绩效统计随之失真。现要求至少
+    # memory_min_holding_days 个交易日过去才结算；实际持有天数取
+    # min(memory_holding_days, 已过去交易日数)。
+    "memory_holding_days": 5,
+    "memory_min_holding_days": 5,
     # LLM settings
     "llm_provider": "openai",
     "deep_think_llm": "gpt-5.4",
@@ -84,9 +91,16 @@ DEFAULT_CONFIG = {
     # None keeps the previous behaviour (the model's own default, ~30). (#16)
     "market_lookback_days": None,
     # Debate and discussion settings
+    # max_debate_rounds：多空"来回"数（1 个来回 = Bull + Bear 各发言一次）。
+    # max_risk_discuss_rounds：三方风控的"循环"数（1 个循环 = A → C → N 各发言一次）。
+    # ⚠️ headless JSON 的 risk_debate/investment_debate 里那个 `rounds` 字段是**发言次数**
+    # （count），不是这里的配置值：配置 1 对应多空 rounds=2、风控 rounds=3。两者单位不同。
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,
     "max_recur_limit": 100,
+    # 单个分析师的工具调用轮次上限（0/负数会让分析师的工具循环失去唯一护栏）。
+    # 正常使用是 1-3 轮；模型反复调同一工具时此前没有上限，只能撞全图 recursion_limit。
+    "max_tool_rounds_per_analyst": 12,
     # Data vendor configuration
     # Category-level configuration (default for all tools in category)
     "data_vendors": {

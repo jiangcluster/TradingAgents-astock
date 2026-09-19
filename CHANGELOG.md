@@ -6,6 +6,117 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.26] — 2026-09-19
+
+承接 0.5.25 的整体评估，处理"静默失败"这一类问题：**评级解析失败会被写成 Hold**、
+**记忆结算的窗口与数据源都不可信**、**交互式 CLI 的断点是死功能**、**工具循环没有护栏**、
+**同一个仓库里有两套并发标准**。
+
+### Changed：评级失败态可区分（不再把"没读懂"记成"Hold"）
+
+链路是：结构化输出失败 → 静默转自由文本 → 自由文本里没有评级词 → `parse_rating`
+落到默认 `Hold` → 报告、账本、下游决策全把它当成一次真实的中性判断。三处都能栽，
+而报告里完全看不出来。
+
+- `agents/utils/rating.py`：新增 `parse_rating_with_source() -> (rating, source)`，
+  source ∈ `label` / `bare` / `fallback`（fallback = 一个评级词都没找到）。
+  `parse_rating` 保持原签名与返回值，只是委托过去；顺带修掉 `parse_rating(None)`
+  会抛 `AttributeError`。
+- `agents/utils/structured.py`：`invoke_structured_or_freetext` 返回
+  `RenderedOutput(text, format)`，format ∈ `structured` / `freetext` /
+  `freetext-fallback`。此前只返回字符串，调用方无从知道这是模型的结构化产出
+  还是一段可能不含评级标签的自由文本。
+- `agents/managers/portfolio_manager.py`：把 format 写进 state（`final_decision_format`）。
+- `graph/signal_processing.py`：新增 `process_signal_detail()`（返回评级 + 来源）。
+- `graph/trading_graph.py`：`finalize_graph_run` 计算并写入 `state["rating_source"]`，
+  为 `fallback` 时打 warning；`agents/utils/memory.py` 据此把标签记成 `Unknown`
+  而不是默认 Hold（绩效统计与 `past_context` 才不会把它当真实持有）。
+- `cli/headless.py`：JSON 增加 `rating_source` / `final_decision_format` /
+  `ta_version` / `usage`。前两项让下游能区分"模型真的给了这个评级"与"解析失败"，
+  `ta_version` 供下游缓存做版本握手（见 0.5.25 评估的 C1/C3）。
+- `tradingagents/__init__.py`：新增 `__version__`；版本一致性测试从三处扩到四处。
+
+### Changed：记忆结算的两道闸与数据源（A1/A2/A3）
+
+原实现有三处口径问题，且都不报错：**没有"持有期是否已满"的门槛**（昨天做的决策今天
+再跑同一只票，会拿 1 日收益当持有期收益回填）、**基准价直接取 `iloc[0]`**（停牌日/
+非交易日会让整个窗口后移）、**结算走 Yahoo 而分析走东财/mootdx**（两套口径两套复权）。
+
+- `graph/trading_graph.py::_fetch_returns`：改为 a-stock 数据源（个股日线 + 沪深300
+  指数），按**日期**对齐后再算收益；基准行日期必须等于 `trade_date`，否则拒绝结算
+  并说明原因（保持 pending）；未满 `memory_min_holding_days` 个交易日不结算。
+  删除 `_normalize_yfinance_ticker` / `_is_unsupported_by_yfinance` 与模块级
+  `yfinance` 依赖（结算不再用它）。
+- `dataflows/a_stock.py`：新增 `get_index_daily()`（新浪主源、腾讯降级）与
+  `_index_prefix()`——指数的 6 位码不与交易所一一对应（000xxx 在沪市、399xxx 在深市），
+  沿用个股的"6 开头=沪市"规则会把 000300 发成 `sz000300` 并拿到空数据。三个 K 线
+  降级函数增加可选 `index_prefix` 复用同一套解析。
+- `default_config.py`：新增 `memory_holding_days`（持有窗口，默认 5 交易日）与
+  `memory_min_holding_days`（最低结算门槛，默认 5 交易日），均可配。
+- ⚠️ **已知代价**：结算变慢（同一只票要 5 个交易日后才回填），只分析一次就再不复盘
+  的标的会更久停留在 pending。这是把"错窗口的收益"换成"暂时没有收益"的取舍。
+
+### Fixed：交互式 CLI 的断点是死功能（B1）+ 断点 key 无配置指纹（B3）
+
+- `cli/main.py`：`--checkpoint` 此前**完全没有效果**——checkpointer 只在
+  `prepare_graph_run` 内挂载，而交互式 CLI 直接 `create_initial_state` +
+  `graph.stream`。连带 `finalize_graph_run` 也被绕过，于是每次交互式分析都
+  **不写 full_states_log、不写记忆日志、不清断点**。现改为走 prepare/finalize，
+  并在结束时 `close_graph_run()`。
+- `graph/checkpointer.py` + `trading_graph.py`：断点 key 由 `(ticker, date)` 扩为
+  `(ticker, date, 配置指纹)`，指纹含 provider/模型/输出语言/轮数/分析师集合/
+  `role_llms`。此前换模型或改分析师集合后重跑同一天会静默续用旧状态（一次运行内
+  混模型），上一次**报错**（不是崩溃）留下的断点也会被当成续跑点。
+
+### Fixed：工具循环护栏与计数值校验（B2/B4）
+
+- `graph/conditional_logic.py`：新增 per-analyst 工具轮次上限
+  （`max_tool_rounds_per_analyst`，默认 12）。此前循环没有任何上限，唯一止损是全图
+  共享的 `recursion_limit`，撞上即抛 `GraphRecursionError`、整次运行的结果全部丢弃，
+  且报错点常在辩论/风控阶段。达到上限即截断该分析师并打 warning（报告可能为空，
+  质量门控会如实判 D/F）。顺带把 7 个 `should_continue_*` 收敛到一个
+  `_route_after_analyst`，并修正两处"3 rounds of back-and-forth"的陈旧注释——实际
+  语义是"来回数/循环数"，配置 1 只有一个来回。
+- `trading_graph.py`：新增 `_validate_count_configs()`，在启动时校验
+  `max_debate_rounds` / `max_risk_discuss_rounds` / `max_tool_rounds_per_analyst` /
+  `memory_*_days` 均为 ≥1 的整数。轮数配 0 时多空辩论会静默退化成单边陈述
+  （Bull 必跑、Bear 永不发言），此前不报错也不告警。
+- `default_config.py`：新增 `max_tool_rounds_per_analyst`；`max_*_rounds` 注释补明
+  "配置值(来回数) 与 headless JSON 里 `rounds`(发言次数) 单位不同"。
+
+### Fixed：统一落盘工具与残留的静默失败（A4/A5/A6/A7/D5/D6）
+
+- 新增 `tradingagents/utils/atomic_io.py`：`atomic_write()` + `file_lock()`。
+  此前只有数据层缓存有这套实现，记忆日志仍用**固定 `.tmp` 路径**且不加锁——两个 TA
+  子进程并行结算会丢更新（各读到同一份旧日志，后写的整体覆盖）或互相写坏临时文件。
+  `a_stock` 的 `_cache_lock` / `_atomic_write` 改为薄别名，避免两套实现。
+- `agents/utils/memory.py`：`store_decision` / `update_with_outcome` /
+  `batch_update_with_outcomes` 全程持锁；落盘走 `atomic_write`；幂等判重从
+  "仅跳过 pending" 扩为按 `(日期, 代码)`（已结算后再跑同一天不再追加重复条目，
+  否则绩效重复计数）；解析不了的条目改为 `warning` 后跳过（此前静默丢弃）。
+- `trading_graph.py`：反思 LLM 调用加 `try/except`——它是可选后处理且发生在跑图
+  之前，一次限流/抖动不该让整次分析失败；失败条目保持 pending。
+- `agents/quality_gate.py`：`FAILURE_MARKERS` 对齐数据层实际文案
+  （补"获取失败/查询失败/Error fetching"，原词表只有"无法获取"）；复审跳过判据由
+  硬编码 `fail_count >= 4` 改为"**超过半数已运行报告未通过**"（原阈值只在 7 个分析师
+  全跑时才等价于过半，分析师集合可变时分母是错的）；`selected_analysts` 缺失时告警。
+
+### Tests
+
+- 新增 `tests/test_graph_flows.py`：条件边路由（7 分析师 × 有/无工具调用）、
+  `capitalize()` 派生的节点名与条件边返回字符串的一致性、`setup_graph` 节点存在性、
+  工具轮次上限、辩论/风控阈值语义、计数值配置校验。
+- `tests/test_signal_processing.py`：评级来源四态（label/bare/fallback/None）。
+- `tests/test_memory_log.py`：结算换源与两道闸（基准行日期、最低交易日、按日期对齐、
+  配置覆盖）、锁的持有（更新/追加）、已结算后不重复落盘、`Unknown` 标签、
+  损坏条目告警、反思异常保持 pending；删除已失效的 Yahoo 符号归一化用例。
+- `tests/test_checkpoint_resume.py`：断点 key 含配置指纹；新增"换配置不复用旧断点"。
+- `tests/test_headless_cli.py` / `tests/test_capabilities.py`：契约字段与
+  `RenderedOutput` 返回值同步。
+- `tests/test_version_consistency.py`：版本一致性覆盖 `tradingagents.__version__`。
+
+全量：567 passed / 13 skipped。
+
 ## [0.5.25] — 2026-09-19
 
 承接 0.5.24 的评级校准，处理整体评估中提出的 4 组问题：**评级校准只有正向触发**、

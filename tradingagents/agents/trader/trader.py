@@ -120,7 +120,7 @@ def create_trader(llm):
             messages,
             render_trader_proposal,
             "Trader",
-        )
+        ).text
 
         return {
             "messages": [AIMessage(content=trader_plan)],

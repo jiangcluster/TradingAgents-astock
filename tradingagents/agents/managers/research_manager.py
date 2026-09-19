@@ -47,13 +47,14 @@ Commit to a clear stance whenever the debate's strongest arguments warrant one; 
 **Debate History:**
 {history}""" + get_language_instruction()
 
-        investment_plan = invoke_structured_or_freetext(
+        rendered = invoke_structured_or_freetext(
             structured_llm,
             llm,
             prompt,
             render_research_plan,
             "Research Manager",
         )
+        investment_plan = rendered.text
 
         new_investment_debate_state = {
             "judge_decision": investment_plan,

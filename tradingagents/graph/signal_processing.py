@@ -12,9 +12,9 @@ This module exists for backwards compatibility with callers that expect a
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Tuple
 
-from tradingagents.agents.utils.rating import parse_rating
+from tradingagents.agents.utils.rating import parse_rating_with_source
 
 
 class SignalProcessor:
@@ -28,4 +28,13 @@ class SignalProcessor:
 
     def process_signal(self, full_signal: str) -> str:
         """Return one of Buy / Overweight / Hold / Underweight / Sell."""
-        return parse_rating(full_signal)
+        return self.process_signal_detail(full_signal)[0]
+
+    def process_signal_detail(self, full_signal) -> Tuple[str, str]:
+        """同上，并额外返回评级来源（label / bare / fallback）。
+
+        ``fallback`` 意味着**没有任何评级依据**，返回值只是默认的 Hold —— 下游
+        必须能把它和"模型真的建议持有"分开，否则一次解析失败就会被写成看多/看空的
+        中性结论，且报告里看不出来。
+        """
+        return parse_rating_with_source(full_signal)

@@ -79,4 +79,11 @@ class AgentState(MessagesState):
         RiskDebateState, "Current state of the debate on evaluating risk"
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
+    # 终裁产出的形态：structured / freetext / freetext-fallback（见 utils/structured.py）。
+    # 自由文本不保证带 `**Rating**:` 标签——不记录来源就无法区分"模型说 Hold"与
+    # "评级没解析出来、落到了默认值"。
+    final_decision_format: Annotated[str, "How the final decision was produced (structured vs free text)"]
+    # 评级从哪里读出来的：label（显式标签）/ bare（正文裸词）/ fallback（什么都没找到，
+    # 已回落到默认 Hold）。fallback 必须与真正的 Hold 区别对待。
+    rating_source: Annotated[str, "Where the 5-tier rating came from: label / bare / fallback"]
     past_context: Annotated[str, "Memory log context injected at run start (same-ticker decisions + cross-ticker lessons)"]

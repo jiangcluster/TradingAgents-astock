@@ -2,9 +2,19 @@
 
 from typing import List, Optional
 from pathlib import Path
+import logging
 import re
 
-from tradingagents.agents.utils.rating import parse_rating
+from tradingagents.agents.utils.rating import SOURCE_FALLBACK, parse_rating
+from tradingagents.utils import atomic_io
+
+logger = logging.getLogger(__name__)
+
+
+# 评级解析失败（什么都没读出来）时写进标签的占位值。
+# 不能沿用默认的 Hold —— 那会把"没解析出来"记成"建议持有"，绩效统计与
+# past_context 都会把它当成一次真实的中性判断。
+UNPARSED_RATING = "Unknown"
 
 
 class TradingMemoryLog:
@@ -33,26 +43,50 @@ class TradingMemoryLog:
         ticker: str,
         trade_date: str,
         final_trade_decision: str,
+        rating_source: str = None,
     ) -> None:
-        """Append pending entry at end of propagate(). No LLM call."""
+        """Append pending entry at end of propagate(). No LLM call.
+
+        ``rating_source`` 为 ``fallback``（终裁里找不到任何评级词）时，标签记为
+        ``Unknown`` 而不是默认的 Hold —— 否则"解析失败"会被绩效统计当成一次真实的
+        持有判断（见 rating.parse_rating_with_source）。
+        """
         if not self._log_path:
             return
-        # Idempotency guard: fast raw-text scan instead of full parse
-        if self._log_path.exists():
-            raw = self._log_path.read_text(encoding="utf-8")
-            for line in raw.splitlines():
-                if line.startswith(f"[{trade_date} | {ticker} |") and line.endswith("| pending]"):
-                    return
-        rating = parse_rating(final_trade_decision)
-        tag = f"[{trade_date} | {ticker} | {rating} | pending]"
-        entry = f"{tag}\n\nDECISION:\n{final_trade_decision}{self._SEPARATOR}"
-        with open(self._log_path, "a", encoding="utf-8") as f:
-            f.write(entry)
+        # 判重扫描 + 追加都要在锁内：两者之间有窗口时，两个进程会各自判定"没写过"
+        # 然后各追加一条，同一天同一只票出现重复条目。
+        with atomic_io.file_lock(str(self._log_path)):
+            # Idempotency guard: fast raw-text scan instead of full parse.
+            # 按「日期 + 代码」判重，不要求旧条目仍是 pending —— 已结算后再跑同一天，
+            # 旧写法会再追加一条同源记录，绩效统计随之重复计数。
+            if self._log_path.exists():
+                raw = self._log_path.read_text(encoding="utf-8")
+                prefix = f"[{trade_date} | {ticker} |"
+                for line in raw.splitlines():
+                    if line.startswith(prefix):
+                        logger.debug(
+                            "memory log: %s on %s already recorded, skipping duplicate",
+                            ticker, trade_date,
+                        )
+                        return
+            if rating_source == SOURCE_FALLBACK:
+                rating = UNPARSED_RATING
+            else:
+                rating = parse_rating(final_trade_decision)
+            tag = f"[{trade_date} | {ticker} | {rating} | pending]"
+            entry = f"{tag}\n\nDECISION:\n{final_trade_decision}{self._SEPARATOR}"
+            with open(self._log_path, "a", encoding="utf-8") as f:
+                f.write(entry)
 
     # --- Read path (Phase A) ---
 
     def load_entries(self) -> List[dict]:
-        """Parse all entries from log. Returns list of dicts."""
+        """Parse all entries from log. Returns list of dicts.
+
+        解析不了的块会**记录 warning** 后跳过。此前静默略过：局部损坏（例如并发
+        追加被读到半条、分隔符丢失）会造成看不见的数据丢失——绩效统计与 past_context
+        都少几行，而没有任何提示。
+        """
         if not self._log_path or not self._log_path.exists():
             return []
         text = self._log_path.read_text(encoding="utf-8")
@@ -62,6 +96,11 @@ class TradingMemoryLog:
             parsed = self._parse_entry(raw)
             if parsed:
                 entries.append(parsed)
+            else:
+                logger.warning(
+                    "memory log: unparseable entry skipped in %s (first line: %r)",
+                    self._log_path, raw.splitlines()[0][:120],
+                )
         return entries
 
     def get_pending_entries(self) -> List[dict]:
@@ -109,12 +148,30 @@ class TradingMemoryLog:
         """Replace pending tag and append REFLECTION section using atomic write.
 
         Finds the first pending entry matching (trade_date, ticker), updates
-        its tag with return figures, and appends a REFLECTION section.  Uses
-        a temp-file + os.replace() so a crash mid-write never corrupts the log.
+        its tag with return figures, and appends a REFLECTION section.
+
+        Concurrency: 这是**读-改-写**，且多个 TA 子进程会并行结算不同票。仅靠
+        临时文件 + os.replace 只保证"读不到半截"，挡不住丢更新（两个进程各读到
+        同一份旧日志，后写的把先写的条目覆盖掉）。故全程持 `file_lock`，落盘走
+        `atomic_write`；原实现用固定 `.tmp` 路径，两个进程还会互相写坏临时文件。
         """
         if not self._log_path or not self._log_path.exists():
             return
 
+        with atomic_io.file_lock(str(self._log_path)):
+            self._update_with_outcome_locked(
+                ticker, trade_date, raw_return, alpha_return, holding_days, reflection
+            )
+
+    def _update_with_outcome_locked(
+        self,
+        ticker: str,
+        trade_date: str,
+        raw_return: float,
+        alpha_return: float,
+        holding_days: int,
+        reflection: str,
+    ) -> None:
         text = self._log_path.read_text(encoding="utf-8")
         blocks = text.split(self._SEPARATOR)
 
@@ -158,9 +215,7 @@ class TradingMemoryLog:
 
         new_blocks = self._apply_rotation(new_blocks)
         new_text = self._SEPARATOR.join(new_blocks)
-        tmp_path = self._log_path.with_suffix(".tmp")
-        tmp_path.write_text(new_text, encoding="utf-8")
-        tmp_path.replace(self._log_path)
+        atomic_io.atomic_write(str(self._log_path), lambda f: f.write(new_text))
 
     def batch_update_with_outcomes(self, updates: List[dict]) -> None:
         """Apply multiple outcome updates in a single read + atomic write.
@@ -171,6 +226,11 @@ class TradingMemoryLog:
         if not self._log_path or not self._log_path.exists() or not updates:
             return
 
+        # 同 update_with_outcome：读-改-写必须串行，否则并发结算会丢条目。
+        with atomic_io.file_lock(str(self._log_path)):
+            self._batch_update_locked(updates)
+
+    def _batch_update_locked(self, updates: List[dict]) -> None:
         text = self._log_path.read_text(encoding="utf-8")
         blocks = text.split(self._SEPARATOR)
 
@@ -212,9 +272,7 @@ class TradingMemoryLog:
 
         new_blocks = self._apply_rotation(new_blocks)
         new_text = self._SEPARATOR.join(new_blocks)
-        tmp_path = self._log_path.with_suffix(".tmp")
-        tmp_path.write_text(new_text, encoding="utf-8")
-        tmp_path.replace(self._log_path)
+        atomic_io.atomic_write(str(self._log_path), lambda f: f.write(new_text))
 
     # --- Helpers ---
 

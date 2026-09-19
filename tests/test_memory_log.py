@@ -2,15 +2,13 @@
 
 import pytest
 import pandas as pd
-from unittest.mock import MagicMock, patch
+import os
+from unittest.mock import MagicMock
 
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.agents.schemas import PortfolioDecision, PortfolioRating
 from tradingagents.graph.reflection import Reflector
-from tradingagents.graph.trading_graph import (
-    TradingAgentsGraph,
-    _normalize_yfinance_ticker,
-)
+from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.graph.propagation import Propagator
 from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
 
@@ -56,9 +54,13 @@ def _resolve_entry(log, ticker, date, decision, reflection="Good call."):
     log.update_with_outcome(ticker, date, 0.05, 0.02, 5, reflection)
 
 
-def _price_df(prices):
-    """Minimal DataFrame matching yfinance .history() output shape."""
-    return pd.DataFrame({"Close": prices})
+def _ohlcv(prices, start="2026-01-05"):
+    """构造 a-stock 口径的日线（结算只用到 Date/Close 两列）。
+
+    Date 用工作日序列，保证"基准行日期 == 分析日"的校验可复现。
+    """
+    dates = pd.bdate_range(start, periods=len(prices))
+    return pd.DataFrame({"Date": dates, "Close": prices})
 
 
 def _make_pm_state(past_context=""):
@@ -388,25 +390,6 @@ class TestTradingMemoryLogCore:
 
 class TestDeferredReflection:
 
-    # Yahoo Finance ticker normalization
-
-    def test_normalize_yfinance_ticker_adds_mainland_exchange_suffix(self):
-        assert _normalize_yfinance_ticker("600519") == "600519.SS"
-        assert _normalize_yfinance_ticker("000001") == "000001.SZ"
-        assert _normalize_yfinance_ticker("688017") == "688017.SS"
-
-    def test_normalize_yfinance_ticker_preserves_qualified_symbols(self):
-        assert _normalize_yfinance_ticker("600519.SS") == "600519.SS"
-        assert _normalize_yfinance_ticker("600519.SH") == "600519.SS"
-        assert _normalize_yfinance_ticker("SH600519") == "600519.SS"
-        assert _normalize_yfinance_ticker("NVDA") == "NVDA"
-
-    def test_normalize_yfinance_ticker_does_not_invent_beijing_suffix(self):
-        assert _normalize_yfinance_ticker("830799") == "830799"
-        assert _normalize_yfinance_ticker("920002") == "920002"
-        assert _normalize_yfinance_ticker("BJ830799") == "830799"
-        assert _normalize_yfinance_ticker("830799.BJ") == "830799"
-
     # update_with_outcome
 
     def test_update_replaces_pending_tag(self, tmp_path):
@@ -445,14 +428,19 @@ class TestDeferredReflection:
         assert aapl["reflection"] == "Neutral result."
         assert msft["ticker"] == "MSFT" and msft["pending"] is True
 
-    def test_update_atomic_write(self, tmp_path):
-        """A pre-existing .tmp file is overwritten; the log is correctly updated."""
+    def test_update_writes_atomically_and_leaves_no_temp(self, tmp_path):
+        """更新走原子写：目录里不留任何临时文件，日志内容正确更新。
+
+        旧实现用固定的 `<log>.tmp` 路径，并发结算时两个进程会互相写坏同一个临时
+        文件；现在临时文件名带随机后缀且写完即替换/清理。
+        """
         log = make_log(tmp_path)
         log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
-        stale_tmp = tmp_path / "trading_memory.tmp"
-        stale_tmp.write_text("GARBAGE CONTENT — should be overwritten", encoding="utf-8")
+
         log.update_with_outcome("NVDA", "2026-01-10", 0.042, 0.021, 5, "Correct.")
-        assert not stale_tmp.exists()
+
+        leftovers = sorted(p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp"))
+        assert leftovers == [], f"残留临时文件: {leftovers}"
         entries = log.load_entries()
         assert len(entries) == 1
         assert entries[0]["reflection"] == "Correct."
@@ -507,65 +495,156 @@ class TestDeferredReflection:
 
     # TradingAgentsGraph._fetch_returns
 
-    def test_fetch_returns_valid_ticker(self):
-        stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
-        bench_prices = [4000.0, 4020.0, 4040.0, 4030.0, 4050.0, 4060.0]
+    def _patch_sources(self, monkeypatch, stock, benchmark, calls=None):
+        """把结算的两个数据源换成固定 DataFrame（a-stock：个股 + 沪深300 指数）。"""
+        from tradingagents.dataflows import a_stock
+
+        def _stock(code, curr_date, **kw):
+            if calls is not None:
+                calls["stock"] = (code, curr_date)
+            return stock
+
+        def _index(code, start=None, end=None, **kw):
+            if calls is not None:
+                calls["index"] = (code, start, end)
+            return benchmark
+
+        monkeypatch.setattr(a_stock, "_load_ohlcv_astock", _stock)
+        monkeypatch.setattr(a_stock, "get_index_daily", _index)
+
+    def test_fetch_returns_measures_from_trade_date(self, monkeypatch):
+        """基准行就是分析日那一行 → 5 个交易日窗口，raw/alpha 按收盘价算。"""
+        self._patch_sources(
+            monkeypatch,
+            _ohlcv([100.0, 102.0, 104.0, 103.0, 105.0, 106.0]),
+            _ohlcv([4000.0, 4020.0, 4040.0, 4030.0, 4050.0, 4060.0]),
+        )
         mock_graph = MagicMock(spec=TradingAgentsGraph)
-        with patch("yfinance.Ticker") as mock_ticker_cls:
-            def _make_ticker(sym):
-                m = MagicMock()
-                m.history.return_value = _price_df(bench_prices if sym == "000300.SS" else stock_prices)
-                return m
-            mock_ticker_cls.side_effect = _make_ticker
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "688017", "2026-01-05")
-        assert raw is not None and alpha is not None and days is not None
-        assert isinstance(raw, float) and isinstance(alpha, float) and isinstance(days, int)
+        mock_graph.config = {}
+
+        raw, alpha, days = TradingAgentsGraph._fetch_returns(
+            mock_graph, "688017", "2026-01-05"
+        )
+
         assert days == 5
+        assert raw == pytest.approx(106.0 / 100.0 - 1)
+        assert alpha == pytest.approx((106.0 / 100.0 - 1) - (4060.0 / 4000.0 - 1))
 
-    def test_fetch_returns_uses_exchange_qualified_astock_symbol(self):
+    def test_fetch_returns_uses_astock_sources_not_yfinance(self, monkeypatch):
+        """结算必须与决策同源：个股走 a-stock 日线，基准走沪深300。
+
+        此前结算走 Yahoo（个股 .SS/.SZ、基准 000300.SS），与分析所用的
+        东财/mootdx 是两套口径两套复权，收益不可比。
+        """
+        calls = {}
+        self._patch_sources(
+            monkeypatch,
+            _ohlcv([100.0, 101.0, 102.0, 103.0, 104.0, 105.0]),
+            _ohlcv([4000.0, 4010.0, 4020.0, 4030.0, 4040.0, 4050.0]),
+            calls,
+        )
         mock_graph = MagicMock(spec=TradingAgentsGraph)
-        with patch("yfinance.Ticker") as mock_ticker_cls:
-            m = MagicMock()
-            m.history.return_value = _price_df([100.0, 101.0, 102.0, 103.0, 104.0, 105.0])
-            mock_ticker_cls.return_value = m
-            TradingAgentsGraph._fetch_returns(mock_graph, "600519", "2026-01-05")
+        mock_graph.config = {}
 
-        assert mock_ticker_cls.call_args_list[0].args == ("600519.SS",)
+        TradingAgentsGraph._fetch_returns(mock_graph, "600519", "2026-01-05")
 
-    def test_fetch_returns_too_recent(self):
-        """Only 1 data point available → returns (None, None, None), no crash."""
+        assert calls["stock"][0] == "600519"
+        assert calls["index"][0] == "000300"
+
+    def test_fetch_returns_defers_before_min_holding_days(self, monkeypatch):
+        """只过去 2 个交易日 → 不结算，保持 pending。
+
+        旧行为会拿 1-2 日收益当持有期收益回填，反思与绩效口径随之失真。
+        """
+        self._patch_sources(
+            monkeypatch,
+            _ohlcv([100.0, 101.0, 102.0]),
+            _ohlcv([4000.0, 4010.0, 4020.0]),
+        )
         mock_graph = MagicMock(spec=TradingAgentsGraph)
-        with patch("yfinance.Ticker") as mock_ticker_cls:
-            m = MagicMock()
-            m.history.return_value = _price_df([100.0])
-            mock_ticker_cls.return_value = m
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-04-19")
-        assert raw is None and alpha is None and days is None
+        mock_graph.config = {}
 
-    def test_fetch_returns_delisted(self):
-        """Empty DataFrame → returns (None, None, None), no crash."""
-        mock_graph = MagicMock(spec=TradingAgentsGraph)
-        with patch("yfinance.Ticker") as mock_ticker_cls:
-            m = MagicMock()
-            m.history.return_value = pd.DataFrame({"Close": []})
-            mock_ticker_cls.return_value = m
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "XXXXXFAKE", "2026-01-10")
-        assert raw is None and alpha is None and days is None
+        assert TradingAgentsGraph._fetch_returns(mock_graph, "600519", "2026-01-05") == (
+            None, None, None,
+        )
 
-    def test_fetch_returns_benchmark_shorter_than_stock(self):
-        """CSI 300 having fewer rows than the stock must not raise IndexError."""
-        stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
-        bench_prices = [4000.0, 4020.0, 4030.0]
+    def test_fetch_returns_honours_config_overrides(self, monkeypatch):
+        self._patch_sources(
+            monkeypatch,
+            _ohlcv([100.0, 102.0, 104.0, 106.0, 108.0, 110.0]),
+            _ohlcv([4000.0, 4000.0, 4000.0, 4000.0, 4000.0, 4000.0]),
+        )
         mock_graph = MagicMock(spec=TradingAgentsGraph)
-        with patch("yfinance.Ticker") as mock_ticker_cls:
-            def _make_ticker(sym):
-                m = MagicMock()
-                m.history.return_value = _price_df(bench_prices if sym == "000300.SS" else stock_prices)
-                return m
-            mock_ticker_cls.side_effect = _make_ticker
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "688017", "2026-01-05")
-        assert raw is not None and alpha is not None and days is not None
+        mock_graph.config = {"memory_holding_days": 2, "memory_min_holding_days": 2}
+
+        raw, alpha, days = TradingAgentsGraph._fetch_returns(
+            mock_graph, "600519", "2026-01-05"
+        )
+
         assert days == 2
+        assert raw == pytest.approx(104.0 / 100.0 - 1)
+
+    def test_fetch_returns_refuses_when_trade_date_has_no_row(self, monkeypatch, caplog):
+        """分析日不是交易日/停牌 → 拒绝结算并说明原因，而不是用后一日的价当基准。"""
+        self._patch_sources(
+            monkeypatch,
+            _ohlcv([100.0, 102.0, 104.0, 106.0, 108.0, 110.0], start="2026-01-06"),
+            _ohlcv([4000.0, 4020.0, 4040.0, 4060.0, 4080.0, 4100.0], start="2026-01-06"),
+        )
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.config = {}
+
+        with caplog.at_level("WARNING"):
+            result = TradingAgentsGraph._fetch_returns(mock_graph, "600519", "2026-01-05")
+
+        assert result == (None, None, None)
+        assert "no trading row" in caplog.text
+
+    def test_fetch_returns_empty_when_price_data_missing(self, monkeypatch):
+        """个股无行情（退市/北交所无源）→ (None, None, None)，不抛异常。"""
+        self._patch_sources(monkeypatch, pd.DataFrame(), _ohlcv([4000.0, 4010.0]))
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.config = {}
+
+        assert TradingAgentsGraph._fetch_returns(mock_graph, "920002", "2026-01-05") == (
+            None, None, None,
+        )
+
+    def test_fetch_returns_empty_when_benchmark_missing(self, monkeypatch):
+        """基准取不到 → 不结算（宁可保持 pending，也不要算出没有基准的收益）。"""
+        self._patch_sources(monkeypatch, _ohlcv([100.0, 101.0, 102.0]), pd.DataFrame())
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.config = {}
+
+        assert TradingAgentsGraph._fetch_returns(mock_graph, "600519", "2026-01-05") == (
+            None, None, None,
+        )
+
+    def test_fetch_returns_aligns_stock_and_benchmark_by_date(self, monkeypatch):
+        """个股停牌缺一天时按**日期**对齐，不能按行号对齐。
+
+        按行号取的话会拿停牌次日的收盘价去比指数的次日收盘价，收益与窗口同时错位。
+        """
+        stock = pd.DataFrame({
+            "Date": pd.to_datetime([
+                "2026-01-05", "2026-01-06", "2026-01-08", "2026-01-09",
+                "2026-01-12", "2026-01-13",
+            ]),
+            "Close": [100.0, 101.0, 103.0, 104.0, 105.0, 106.0],
+        })
+        bench = _ohlcv([4000.0, 4010.0, 4020.0, 4030.0, 4040.0, 4050.0, 4060.0])
+        self._patch_sources(monkeypatch, stock, bench)
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.config = {}
+
+        raw, alpha, days = TradingAgentsGraph._fetch_returns(
+            mock_graph, "600519", "2026-01-05"
+        )
+
+        assert days == 5
+        assert raw == pytest.approx(106.0 / 100.0 - 1)
+        # 基准取 01-13 那行（与个股同一日期），而不是第 6 行之前的任意一行
+        assert alpha == pytest.approx((106.0 / 100.0 - 1) - (4060.0 / 4000.0 - 1))
 
     # TradingAgentsGraph._resolve_pending_entries
 
@@ -733,6 +812,106 @@ class TestPortfolioManagerInjection:
 
 
 # ---------------------------------------------------------------------------
+# 并发安全与静默失败：锁、重复落盘、解析失败、反思异常
+# ---------------------------------------------------------------------------
+
+class TestMemoryConcurrencyAndVisibility:
+
+    def test_update_holds_lock_across_read_modify_write(self, tmp_path, monkeypatch):
+        """更新期间必须持锁。
+
+        原子替换只保证"读不到半截"，挡不住丢更新：两个 TA 子进程各读到同一份旧日志，
+        后写的把先写的条目整体覆盖。故读-改-写全程必须持 file_lock。
+        """
+        from tradingagents.utils import atomic_io
+
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", "2026-01-05", DECISION_BUY)
+        observed = {}
+        real_write = atomic_io.atomic_write
+
+        def spy(path, write_fn):
+            observed["lock_held"] = os.path.exists(f"{path}.lock")
+            return real_write(path, write_fn)
+
+        monkeypatch.setattr(atomic_io, "atomic_write", spy)
+
+        log.update_with_outcome("NVDA", "2026-01-05", 0.05, 0.02, 5, "ok")
+
+        assert observed["lock_held"] is True, "读-改-写全过程没有持锁"
+
+    def test_store_decision_takes_lock(self, tmp_path, monkeypatch):
+        """判重扫描与追加之间有窗口 → 也必须在锁内完成。"""
+        log = make_log(tmp_path)
+        observed = {}
+        real_open = open
+
+        def spy_open(file, mode="r", *args, **kwargs):
+            if str(file).endswith("trading_memory.md") and "a" in mode:
+                observed["lock_held"] = os.path.exists(f"{file}.lock")
+            return real_open(file, mode, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", spy_open)
+
+        log.store_decision("NVDA", "2026-01-05", DECISION_BUY)
+
+        assert observed["lock_held"] is True
+
+    def test_store_decision_skips_entry_already_settled(self, tmp_path):
+        """已结算后再跑同一天不得追加同源条目（否则绩效重复计数）。"""
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", "2026-01-05", DECISION_BUY)
+        log.update_with_outcome("NVDA", "2026-01-05", 0.05, 0.02, 5, "ok")
+
+        log.store_decision("NVDA", "2026-01-05", DECISION_BUY)
+
+        assert len(log.load_entries()) == 1
+
+    def test_store_decision_records_unparsed_rating_as_unknown(self, tmp_path):
+        """评级解析失败不能写成默认的 Hold —— 那会把"没读懂"记成"建议持有"。"""
+        log = make_log(tmp_path)
+
+        log.store_decision(
+            "NVDA", "2026-01-05", DECISION_NO_RATING, rating_source="fallback"
+        )
+
+        entries = log.load_entries()
+        assert entries[0]["rating"] == "Unknown"
+
+    def test_load_entries_warns_on_unparseable_block(self, tmp_path, caplog):
+        """损坏条目不能被静默丢弃：必须留下可追查的痕迹。"""
+        log = make_log(tmp_path)
+        path = tmp_path / "trading_memory.md"
+        path.write_text(
+            "[2026-01-05 | NVDA | Buy | pending]\n\nDECISION:\nok\n"
+            + _SEP
+            + "这不是一条合法条目\n",
+            encoding="utf-8",
+        )
+
+        with caplog.at_level("WARNING"):
+            entries = log.load_entries()
+
+        assert len(entries) == 1
+        assert "unparseable entry skipped" in caplog.text
+
+    def test_resolve_keeps_entry_pending_when_reflection_fails(self, tmp_path):
+        """反思是可选后处理：它失败不能让整次分析挂掉，条目保持 pending 下次再算。"""
+        log = make_log(tmp_path)
+        log.store_decision("NVDA", "2026-01-05", DECISION_BUY)
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        mock_graph.memory_log = log
+        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+        mock_graph.reflector = MagicMock()
+        mock_graph.reflector.reflect_on_final_decision.side_effect = RuntimeError("限流")
+
+        TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
+
+        assert len(log.get_pending_entries()) == 1
+        assert not log.load_entries()[0].get("reflection")
+
+
+# ---------------------------------------------------------------------------
 # Legacy removal: BM25 / FinancialSituationMemory fully gone
 # ---------------------------------------------------------------------------
 
@@ -794,6 +973,9 @@ class TestLegacyRemoval:
         mock_graph.propagator.create_initial_state.return_value = fake_state
         mock_graph.propagator.get_graph_args.return_value = {}
         mock_graph.signal_processor.process_signal.return_value = "Buy"
+        # finalize_graph_run 现在取「评级 + 来源」，MagicMock 默认不可迭代，
+        # 必须显式给出二元组，否则解包失败（ValueError: not enough values to unpack）。
+        mock_graph.signal_processor.process_signal_detail.return_value = ("Buy", "label")
         # Bind the real _run_graph so propagate's call to self._run_graph executes
         # the actual write path instead of the auto-MagicMock.
         mock_graph._run_graph = functools.partial(

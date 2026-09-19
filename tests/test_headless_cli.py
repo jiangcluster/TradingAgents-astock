@@ -44,12 +44,15 @@ def _full_final_state() -> dict:
         },
         "final_trade_decision": "最终决策：Buy 建议买入",
         "investment_plan": "计划：1/3 仓",
+        # 评级来源与终裁形态：下游据此区分"模型真的给了这个评级"与"解析失败落到默认值"
+        "rating_source": "label",
+        "final_decision_format": "structured",
     }
 
 
 def test_run_headless_output_shape(monkeypatch):
     class FakeGraph:
-        def __init__(self, selected_analysts, debug, config):
+        def __init__(self, selected_analysts, debug, config, callbacks=None):
             assert selected_analysts == ["market", "news"]
             assert debug is False
             assert config["llm_provider"] == "deepseek"
@@ -69,6 +72,11 @@ def test_run_headless_output_shape(monkeypatch):
     assert result["decision"] == "Buy"
     assert "Buy" in result["final_trade_decision"]
     assert result["investment_plan"] == "计划：1/3 仓"
+    # 契约字段：来源 + 形态 + 版本握手 + 用量
+    assert result["rating_source"] == "label"
+    assert result["final_decision_format"] == "structured"
+    assert result["ta_version"]
+    assert set(result["usage"]) == {"llm_calls", "tool_calls", "tokens_in", "tokens_out"}
 
     # analysis_detail：完整分析过程透传
     detail = result["analysis_detail"]
@@ -96,7 +104,7 @@ def test_run_headless_analysis_detail_missing_fields(monkeypatch):
     """final_state 缺字段时（旧版本引擎/异常状态）不得抛 KeyError，降级为空结构。"""
 
     class FakeGraph:
-        def __init__(self, selected_analysts, debug, config):
+        def __init__(self, selected_analysts, debug, config, callbacks=None):
             pass
 
         def propagate(self, code, date_str):

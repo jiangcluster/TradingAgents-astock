@@ -35,6 +35,7 @@ import pandas as pd
 import requests as _requests
 
 from .utils import safe_ticker_component
+from tradingagents.utils import atomic_io
 
 logger = logging.getLogger(__name__)
 
@@ -256,71 +257,19 @@ def _date_is_after(value, cutoff) -> bool:
 
 
 @contextlib.contextmanager
-def _cache_lock(path: str, timeout: float = 10.0):
-    """共享缓存（CSV）的跨进程文件锁。
+def _cache_lock(path: str, timeout: float = atomic_io.DEFAULT_LOCK_TIMEOUT):
+    """共享缓存的跨进程锁（实现见 `tradingagents.utils.atomic_io.file_lock`）。
 
-    动因：一次深析会并发跑多个 TA 子进程，而北向/资金流这两份缓存是
-    **读-改-写**（在已有行基础上并入本次快照）。只用临时文件+os.replace
-    做到原子替换仍会丢更新——两个进程各自读到同一份旧表，后写的那个把先写的
-    行覆盖掉。行数越多越明显，且症状是"缓存里就是少几天"，很难追。
-
-    实现为 ``O_CREAT|O_EXCL`` 锁文件 + 超时；持锁进程被 kill 留下的残留锁
-    按 mtime 超龄接管。**抢不到锁不报错**：退化为无锁读改写（等于原行为），
-    缓存争用不该把整个取数流程打断。
+    保留本层私有别名，因为缓存路径语义属于数据层；记忆日志等其它模块直接用
+    `atomic_io.file_lock`，避免各写一套。
     """
-    lock_path = f"{path}.lock"
-    deadline = time.monotonic() + timeout
-    acquired = False
-    fd = None
-    while True:
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode("ascii", "ignore"))
-            acquired = True
-            break
-        except FileExistsError:
-            with contextlib.suppress(OSError):
-                if time.time() - os.path.getmtime(lock_path) > timeout * 6:
-                    os.unlink(lock_path)   # 残留锁（持锁进程已被杀）
-                    continue
-            if time.monotonic() >= deadline:
-                logger.warning("cache lock timeout, proceeding unlocked: %s", lock_path)
-                break
-            time.sleep(0.05)
-        except OSError:
-            break
-    try:
+    with atomic_io.file_lock(path, timeout) as acquired:
         yield acquired
-    finally:
-        if fd is not None:
-            with contextlib.suppress(OSError):
-                os.close(fd)
-        if acquired:
-            with contextlib.suppress(OSError):
-                os.unlink(lock_path)
 
 
 def _atomic_write(path: str, write_fn) -> None:
-    """临时文件 + ``os.replace`` 原子落盘。
-
-    并发深析下多个子进程会写同一份缓存；直接 ``to_csv(path)`` 在写一半时被
-    另一个进程读到，会得到截断的 CSV（pandas 报 ParserError 或静默少行）。
-    这里换成一个原子替换：读者要么看到旧文件，要么看到新文件。
-    """
-    import tempfile
-
-    dirname = os.path.dirname(path) or "."
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=dirname
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
-            write_fn(f)
-        os.replace(tmp_path, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp_path)
-        raise
+    """临时文件 + ``os.replace`` 原子落盘（实现见 `tradingagents.utils.atomic_io`）。"""
+    atomic_io.atomic_write(path, write_fn)
 
 
 # ---------------------------------------------------------------------------
@@ -943,14 +892,17 @@ def _em_kline_fallback(code: str, start_date: str = None, end_date: str = None) 
 # ---------------------------------------------------------------------------
 
 
-def _tencent_kline_fallback(code: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+def _tencent_kline_fallback(
+    code: str, start_date: str = None, end_date: str = None, index_prefix: str = None
+) -> pd.DataFrame:
     """Fetch daily 前复权 K-line from 腾讯 web.ifzq.gtimg.cn as fallback.
 
     行格式：[date, open, close, high, low, volume(手)]（注意收盘在 idx2）。
     成交量单位「手」，×100 换算为「股」以对齐新浪/东财降级源。
+    ``index_prefix`` 供指数复用本解析（指数码不能按个股规则推前缀，见 `_index_prefix`）。
     Returns DataFrame with columns: Date, Open, High, Low, Close, Volume.
     """
-    prefix = _get_prefix(code)
+    prefix = index_prefix or _get_prefix(code)
     prefixed = f"{prefix}{code}"
     url = (
         "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
@@ -993,12 +945,15 @@ def _tencent_kline_fallback(code: str, start_date: str = None, end_date: str = N
 # ---------------------------------------------------------------------------
 
 
-def _sina_kline_fallback(code: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+def _sina_kline_fallback(
+    code: str, start_date: str = None, end_date: str = None, index_prefix: str = None
+) -> pd.DataFrame:
     """Fetch daily K-line from Sina HTTP API as mootdx fallback.
 
+    ``index_prefix`` 供指数复用本解析（指数码不能按个股规则推前缀，见 `_index_prefix`）。
     Returns DataFrame with columns: Date, Open, High, Low, Close, Volume.
     """
-    prefix = "sh" if code.startswith("6") else "sz"
+    prefix = index_prefix or ("sh" if code.startswith("6") else "sz")
     url = (
         "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
         "CN_MarketData.getKLineData"
@@ -1036,6 +991,44 @@ def _sina_kline_fallback(code: str, start_date: str = None, end_date: str = None
         df = df[df["Date"] <= pd.to_datetime(end_date)]
 
     return df
+
+
+def _index_prefix(code: str) -> str:
+    """指数代码 → 交易所前缀。
+
+    **不能**沿用个股规则（6 开头 = 沪市）：指数的 6 位码不与交易所一一对应——
+    ``000xxx``（上证指数 / 沪深300 / 中证500 / 中证1000）在上交所，``399xxx``
+    （深证成指 / 创业板指）在深交所。按个股规则会把 000300 发成 ``sz000300``，
+    接口返回空，看起来像"这个指数没有数据"。
+    """
+    return "sz" if code.startswith("399") else "sh"
+
+
+def get_index_daily(
+    code: str, start_date: str = None, end_date: str = None
+) -> pd.DataFrame:
+    """指数日线（新浪主源、腾讯降级）。
+
+    个股链路（mootdx→东财→腾讯→新浪）对指数不适用：mootdx 在本网络被协议层拦截，
+    东财 push2his 对指数 secid 返回空行。实测（2026-09-19，A 股主服务器）新浪与腾讯的
+    ``sh000300`` 都能取到完整日线，故这里直接走这两家，不再尝试 mootdx/东财。
+
+    指数无复权问题；两家源的成交量口径不同（新浪为股、腾讯为手），本函数不统一换算
+    ——调用方只用 Close 算收益，成交量不参与。
+    """
+    prefix = _index_prefix(code)
+    for name, fetch in (
+        ("sina", _sina_kline_fallback),
+        ("tencent", _tencent_kline_fallback),
+    ):
+        try:
+            df = fetch(code, start_date, end_date, index_prefix=prefix)
+        except Exception as e:
+            logger.warning("index daily %s via %s failed: %s", code, name, e)
+            continue
+        if df is not None and not df.empty:
+            return df
+    return pd.DataFrame()
 
 
 def _last_ohlcv_date(df: pd.DataFrame) -> pd.Timestamp | None:

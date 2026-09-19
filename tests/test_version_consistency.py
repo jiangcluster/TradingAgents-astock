@@ -33,3 +33,18 @@ def test_claude_md_current_version_matches_pyproject():
     assert m.group(1) == version, (
         f"CLAUDE.md 写的是 {m.group(1)}，pyproject 是 {version}"
     )
+
+
+def test_package_dunder_version_matches_pyproject():
+    """`tradingagents.__version__` 是**运行时**的版本来源。
+
+    headless JSON 的 `ta_version` 取自它，下游（深研）缓存据此做版本握手——
+    这里落后于 pyproject 的话，下游会误判结论出自哪一版。
+    """
+    version = _pyproject_version()
+    text = (ROOT / "tradingagents" / "__init__.py").read_text(encoding="utf-8")
+    m = re.search(r'^__version__\s*=\s*"([^"]+)"', text, re.M)
+    assert m, "tradingagents/__init__.py 里找不到 __version__"
+    assert m.group(1) == version, (
+        f"tradingagents.__version__ 是 {m.group(1)}，pyproject 是 {version}"
+    )

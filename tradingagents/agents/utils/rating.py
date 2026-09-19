@@ -97,33 +97,58 @@ def parse_rating(text: str, default: str = "Hold") -> str:
     4. First bare Chinese rating term found anywhere (longest match wins).
 
     Returns a Title-cased canonical rating, or ``default`` if none appears.
+
+    ⚠️ 只知道评级、不知道**怎么来的**时不要用这个函数——`default` 会让"解析失败"
+    与"真的是 Hold"长得一模一样。需要区分时用 `parse_rating_with_source`。
     """
+    return parse_rating_with_source(text, default)[0]
+
+
+# 评级来源：显式标签 / 裸词 / 什么都没找到（落回 default）。
+SOURCE_LABEL = "label"
+SOURCE_BARE = "bare"
+SOURCE_FALLBACK = "fallback"
+
+
+def parse_rating_with_source(text, default: str = "Hold") -> Tuple[str, str]:
+    """同 `parse_rating`，但额外返回来源标记。
+
+    动因（2026-09 复盘）：结构化输出失败时会静默转自由文本，自由文本里若没有评级词，
+    `parse_rating` 会落到 `default="Hold"` —— 于是"模型没说清楚"被写成了"模型建议持有"，
+    报告、账本、绩效统计里完全看不出来。调用方拿到本函数的第二项即可区分：
+    ``fallback`` 表示**没有任何评级依据**，必须区别于真正的 Hold（降权 / 计入失败）。
+    """
+    rating, source = _parse_rating_with_source(text or "", default)
+    return rating, source
+
+
+def _parse_rating_with_source(text: str, default: str) -> Tuple[str, str]:
     # 1. English explicit label
     for line in text.splitlines():
         m = _RATING_LABEL_RE.search(line)
         if m and m.group(1).lower() in _RATING_SET:
-            return m.group(1).capitalize()
+            return m.group(1).capitalize(), SOURCE_LABEL
 
     # 2. Chinese explicit label (最终评级：卖出 …)
     m = _CN_LABEL_RE.search(text)
     if m:
-        return _CN_RATING_MAP[m.group(1)]
+        return _CN_RATING_MAP[m.group(1)], SOURCE_LABEL
 
     # 2b. Chinese label + English rating word (最终评级：Buy)
     m = _CN_LABEL_EN_RE.search(text)
     if m:
-        return m.group(1).capitalize()
+        return m.group(1).capitalize(), SOURCE_LABEL
 
     # 3. Bare English rating word
     for line in text.splitlines():
         for word in line.lower().split():
             clean = word.strip("*:.,")
             if clean in _RATING_SET:
-                return clean.capitalize()
+                return clean.capitalize(), SOURCE_BARE
 
     # 4. Bare Chinese rating term (last resort; leftmost, longest at that spot)
     m = _CN_TERM_RE.search(text)
     if m:
-        return _CN_RATING_MAP[m.group(0)]
+        return _CN_RATING_MAP[m.group(0)], SOURCE_BARE
 
-    return default
+    return default, SOURCE_FALLBACK

@@ -1,13 +1,14 @@
 # TradingAgents/graph/trading_graph.py
 
 import logging
+import hashlib
 import os
 from pathlib import Path
 import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, List, Optional
 
-import yfinance as yf
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,7 @@ from tradingagents.llm_clients import create_llm_client
 from tradingagents.agents import *
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.agents.utils.rating import SOURCE_FALLBACK
 from tradingagents.dataflows.utils import safe_ticker_component
 from tradingagents.agents.utils.agent_states import (
     AgentState,
@@ -67,75 +69,50 @@ _PROVIDER_SPECIFIC_KWARGS = frozenset({
 })
 
 
-def _normalize_yfinance_ticker(ticker: str) -> str:
-    """Return the Yahoo Finance symbol for a ticker used by the graph.
+def _require_positive_int(config: Dict[str, Any], key: str, why: str) -> int:
+    """配置里的计数值必须是 ≥1 的整数，否则**启动即报错**。
 
-    A-stock decisions are stored with their six-digit code (for example
-    ``600519``), while Yahoo Finance requires an exchange suffix for mainland
-    China listings (``600519.SS``).  Without the suffix ``Ticker.history``
-    usually returns an empty frame, so deferred memory outcomes remain pending
-    indefinitely.  Common A-share prefixes/suffixes are normalized as well;
-    non-A-share symbols remain unchanged so the graph remains usable for other
-    markets too.
+    这些值直接决定流程走几步/隔多久结算。0 或负数不会报错，只会让某段流程
+    静默消失（例如轮数=0 时 Bear 永远不发言、门槛=0 时 1 日收益被当成持有期收益），
+    而运行结果看起来完全正常——所以宁可启动失败，也不要静默退化。
     """
-    symbol = str(ticker).strip().upper()
-
-    # The A-stock layer accepts SH/SZ/BJ prefixes and uses .SH for Shanghai,
-    # whereas Yahoo uses .SS.  Normalize those forms before handling bare
-    # six-digit codes. Yahoo has no Beijing exchange suffix, so keep BJ codes
-    # unqualified instead of inventing a symbol that cannot return data.
-    if (
-        len(symbol) == 9
-        and symbol[:6].isdigit()
-        and symbol[6:] in (".SH", ".SZ", ".BJ")
-    ):
-        code, exchange = symbol[:6], symbol[7:]
-        if exchange == "SH":
-            return f"{code}.SS"
-        if exchange == "SZ":
-            return f"{code}.SZ"
-        return code
-    if (
-        len(symbol) == 8
-        and symbol[:2] in ("SH", "SZ", "BJ")
-        and symbol[2:].isdigit()
-    ):
-        code, exchange = symbol[2:], symbol[:2]
-        if exchange == "SH":
-            return f"{code}.SS"
-        if exchange == "SZ":
-            return f"{code}.SZ"
-        return code
-
-    if len(symbol) != 6 or not symbol.isdigit():
-        return symbol
-
-    # The 920xxx range is Beijing-listed; Yahoo has no supported suffix for it.
-    if symbol.startswith("92"):
-        return symbol
-    # Shanghai-listed A shares, B shares and ETFs use the .SS suffix on Yahoo.
-    if symbol.startswith(("5", "6", "9")):
-        return f"{symbol}.SS"
-    # Other Beijing-listed six-digit ranges are not covered by Yahoo either.
-    if symbol.startswith(("4", "8")):
-        return symbol
-    # Shenzhen-listed stocks (000/001/002/003/300/301, etc.).
-    return f"{symbol}.SZ"
+    value = config.get(key)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key} must be an integer, got {value!r}. {why}")
+    if parsed < 1:
+        raise ValueError(f"{key} must be >= 1, got {parsed}. {why}")
+    return parsed
 
 
-def _is_unsupported_by_yfinance(symbol: str) -> bool:
-    """True for codes Yahoo Finance has no coverage for at all.
+def _validate_count_configs(config: Dict[str, Any]) -> None:
+    """启动时校验所有"计数值"配置（0/负数会让整段流程静默消失）。
 
-    Beijing Stock Exchange listings (920xxx current, 43x/83x/87x legacy) are
-    absent from Yahoo under every suffix — verified 2026-07-31: ``920002``,
-    ``920002.BJ``, ``920002.SS`` and ``920002.SZ`` all return an empty frame.
-    Retrying them every run only burns a request and leaves the memory entry
-    pending forever with no stated reason, so short-circuit and say why once.
+    这些值不参与计算，只决定流程走几步 / 隔多久结算。设成 0 不会报错，只会让某段
+    流程悄悄消失（轮数=0 → 空头研究员永不发言；门槛=0 → 1 日收益被当成持有期收益），
+    而运行结果看起来完全正常。宁可启动失败，也不要静默退化。
     """
-    return (
-        len(symbol) == 6
-        and symbol.isdigit()
-        and (symbol.startswith("92") or symbol[:2] in ("43", "83", "87"))
+    _require_positive_int(
+        config, "max_debate_rounds",
+        "0 会让空头研究员永不发言（多空辩论退化成单边陈述）——"
+        "质量门控到空头研究员之间的边是无条件边，Bull 必然先跑一次。",
+    )
+    _require_positive_int(
+        config, "max_risk_discuss_rounds",
+        "0 会让保守/中立两位风控分析师永不发言（三方风控只剩激进一方）。",
+    )
+    _require_positive_int(
+        config, "max_tool_rounds_per_analyst",
+        "它是单个分析师工具循环的唯一护栏，缺了只能撞全图 recursion_limit。",
+    )
+    _require_positive_int(
+        config, "memory_min_holding_days",
+        "否则未满持有期的决策会按过短的窗口结算，反思与绩效口径失真。",
+    )
+    _require_positive_int(
+        config, "memory_holding_days",
+        "它是结算时采用的持有窗口（交易日）。",
     )
 
 
@@ -177,6 +154,9 @@ class TradingAgentsGraph:
         self.callbacks = callbacks or []
         # 本次实际进图的分析师键：注入状态供数据质量门控只对已运行者判级（见 quality_gate）
         self.selected_analysts = list(selected_analysts or [])
+
+        # 计数值配置一律在启动时校验（0/负数会让整段流程静默消失）
+        _validate_count_configs(self.config)
 
         # Update the interface's config
         set_config(self.config)
@@ -289,6 +269,7 @@ class TradingAgentsGraph:
         self.conditional_logic = ConditionalLogic(
             max_debate_rounds=self.config["max_debate_rounds"],
             max_risk_discuss_rounds=self.config["max_risk_discuss_rounds"],
+            max_tool_rounds=self.config["max_tool_rounds_per_analyst"],
         )
         self.graph_setup = GraphSetup(
             self.quick_thinking_llm,
@@ -507,47 +488,85 @@ class TradingAgentsGraph:
         }
 
     def _fetch_returns(
-        self, ticker: str, trade_date: str, holding_days: int = 5
+        self, ticker: str, trade_date: str
     ) -> Tuple[Optional[float], Optional[float], Optional[int]]:
-        """Fetch raw and alpha return for ticker over holding_days from trade_date.
+        """Fetch raw and alpha return for ticker measured from trade_date.
 
-        Returns (raw_return, alpha_return, actual_holding_days) or
-        (None, None, None) if price data is unavailable (too recent, delisted,
-        or network error).
+        Returns ``(raw_return, alpha_return, actual_holding_days)`` or
+        ``(None, None, None)`` when the entry must stay pending.
+
+        两道闸（2026-09 复盘新增，此前两道都没有）：
+
+        1. **基准行日期必须等于 trade_date**。原先直接取 ``iloc[0]`` 当基准价，
+           不校验它是不是分析日那一行——停牌日/非交易日会让窗口整体后移，收益与
+           标签都指向另一段时间，而且报告里完全看不出来。
+        2. **未满最少交易日不结算**。原先只要 ≥2 行就结算：昨天做的决策今天再跑
+           同一只票，会拿 1 日收益当持有期回填，反思与绩效口径随之失真。
+           ``memory_min_holding_days``（默认 5）满之前一律保持 pending。
+
+        数据源改为与决策同源的 a-stock（个股 + 沪深300 指数），不再用 Yahoo——
+        分析用东财/mootdx、结算用 Yahoo 意味着两个口径两套复权，收益不可比。
         """
+        from tradingagents.dataflows import a_stock
+
+        holding_days = int(self.config.get("memory_holding_days", 5))
+        min_days = int(self.config.get("memory_min_holding_days", 5))
         try:
-            start = datetime.strptime(trade_date, "%Y-%m-%d")
-            end = start + timedelta(days=holding_days + 7)  # buffer for weekends/holidays
+            start = datetime.strptime(str(trade_date), "%Y-%m-%d")
+            end = start + timedelta(days=holding_days + 15)  # buffer for weekends/holidays
             end_str = end.strftime("%Y-%m-%d")
 
-            yf_symbol = _normalize_yfinance_ticker(ticker)
-            if _is_unsupported_by_yfinance(yf_symbol):
-                # Say why instead of leaving a silent forever-pending entry.
+            stock = a_stock._load_ohlcv_astock(ticker, end_str)
+            if stock is None or stock.empty:
                 logger.warning(
-                    "Cannot resolve outcome for %s: Yahoo Finance has no Beijing "
-                    "Stock Exchange coverage under any suffix, so this entry stays "
-                    "pending. Use a non-BSE ticker if you need memory reflection.",
-                    ticker,
+                    "Could not resolve outcome for %s on %s: no price data (will retry "
+                    "next run).", ticker, trade_date,
+                )
+                return None, None, None
+            stock = stock[stock["Date"] >= pd.to_datetime(trade_date)]
+
+            benchmark = a_stock.get_index_daily("000300", trade_date, end_str)
+            if benchmark is None or benchmark.empty:
+                logger.warning(
+                    "Could not resolve outcome for %s on %s: CSI 300 benchmark data "
+                    "unavailable (will retry next run).", ticker, trade_date,
                 )
                 return None, None, None
 
-            stock = yf.Ticker(yf_symbol).history(start=trade_date, end=end_str)
-            benchmark = yf.Ticker("000300.SS").history(start=trade_date, end=end_str)
-
-            if len(stock) < 2 or len(benchmark) < 2:
+            # 按日期对齐后再算：两个源各缺几天时，行对行的位置会错开。
+            merged = (
+                stock[["Date", "Close"]]
+                .merge(benchmark[["Date", "Close"]], on="Date", suffixes=("_s", "_b"))
+                .sort_values("Date")
+                .reset_index(drop=True)
+            )
+            if merged.empty:
                 return None, None, None
 
-            actual_days = min(holding_days, len(stock) - 1, len(benchmark) - 1)
-            raw = float(
-                (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
-                / stock["Close"].iloc[0]
-            )
-            bench_ret = float(
-                (benchmark["Close"].iloc[actual_days] - benchmark["Close"].iloc[0])
-                / benchmark["Close"].iloc[0]
-            )
-            alpha = raw - bench_ret
-            return raw, alpha, actual_days
+            base_date = merged["Date"].iloc[0].strftime("%Y-%m-%d")
+            if base_date != str(trade_date):
+                logger.warning(
+                    "Cannot resolve outcome for %s: %s has no trading row (first available "
+                    "is %s). Entry stays pending instead of measuring from the wrong base "
+                    "price.", ticker, trade_date, base_date,
+                )
+                return None, None, None
+
+            elapsed = len(merged) - 1
+            if elapsed < min_days:
+                logger.info(
+                    "%s on %s: only %d trading day(s) elapsed, need %d (memory_min_holding_days)"
+                    "; deferring settlement.",
+                    ticker, trade_date, elapsed, min_days,
+                )
+                return None, None, None
+
+            actual_days = min(holding_days, elapsed)
+            base_stock = float(merged["Close_s"].iloc[0])
+            base_bench = float(merged["Close_b"].iloc[0])
+            raw = float(merged["Close_s"].iloc[actual_days]) / base_stock - 1
+            bench_ret = float(merged["Close_b"].iloc[actual_days]) / base_bench - 1
+            return raw, raw - bench_ret, actual_days
         except Exception as e:
             logger.warning(
                 "Could not resolve outcome for %s on %s (will retry next run): %s",
@@ -574,11 +593,21 @@ class TradingAgentsGraph:
             raw, alpha, days = self._fetch_returns(ticker, entry["date"])
             if raw is None:
                 continue  # price not available yet — try again next run
-            reflection = self.reflector.reflect_on_final_decision(
-                final_decision=entry.get("decision", ""),
-                raw_return=raw,
-                alpha_return=alpha,
-            )
+            try:
+                reflection = self.reflector.reflect_on_final_decision(
+                    final_decision=entry.get("decision", ""),
+                    raw_return=raw,
+                    alpha_return=alpha,
+                )
+            except Exception as e:
+                # 反思是**可选的后处理**，且发生在跑图之前：让一次限流/网络抖动
+                # 把整次分析拖挂，是把可选项变成了硬依赖。跳过该条（保持 pending），
+                # 下次再结算。
+                logger.warning(
+                    "Reflection failed for %s on %s (%s: %s); entry stays pending.",
+                    ticker, entry.get("date"), type(e).__name__, e,
+                )
+                continue
             updates.append({
                 "ticker": ticker,
                 "trade_date": entry["date"],
@@ -600,6 +629,28 @@ class TradingAgentsGraph:
         """
         return self._run_graph(company_name, trade_date)
 
+    def _run_fingerprint(self) -> str:
+        """本次运行的"配置指纹"，用于断点续跑的 key。
+
+        只按 (ticker, date) 认断点会出两类静默错误：换了模型或改了分析师集合后重跑
+        同一天，会静默续用旧状态（已完成阶段用旧模型、剩余阶段用新模型，报告里看不
+        出来）；上一次**报错**（不是崩溃）留下的断点也会被当成续跑点。把与结果相关
+        的配置一并纳入 key，配置一变就等于开新跑。
+        """
+        relevant = {
+            "llm_provider": self.config.get("llm_provider"),
+            "deep_think_llm": self.config.get("deep_think_llm"),
+            "quick_think_llm": self.config.get("quick_think_llm"),
+            "output_language": self.config.get("output_language"),
+            "market_lookback_days": self.config.get("market_lookback_days"),
+            "max_debate_rounds": self.config.get("max_debate_rounds"),
+            "max_risk_discuss_rounds": self.config.get("max_risk_discuss_rounds"),
+            "role_llms": self.config.get("role_llms"),
+            "selected_analysts": sorted(self.selected_analysts),
+        }
+        blob = json.dumps(relevant, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:8]
+
     def prepare_graph_run(
         self,
         company_name,
@@ -619,6 +670,7 @@ class TradingAgentsGraph:
 
         checkpoint_enabled = self.config.get("checkpoint_enabled")
         resume_step = None
+        fingerprint = self._run_fingerprint() if checkpoint_enabled else ""
 
         # Recompile with a checkpointer if the user opted in.
         if checkpoint_enabled:
@@ -629,7 +681,7 @@ class TradingAgentsGraph:
             self.graph = self.workflow.compile(checkpointer=saver)
 
             resume_step = checkpoint_step(
-                self.config["data_cache_dir"], company_name, str(trade_date)
+                self.config["data_cache_dir"], company_name, str(trade_date), fingerprint
             )
             if resume_step is not None:
                 logger.info(
@@ -643,9 +695,9 @@ class TradingAgentsGraph:
 
         args = self.propagator.get_graph_args(callbacks=callbacks)
 
-        # Inject thread_id so same ticker+date resumes, different date starts fresh.
+        # Inject thread_id so same ticker+date(+config) resumes, anything else starts fresh.
         if checkpoint_enabled:
-            tid = thread_id(company_name, str(trade_date))
+            tid = thread_id(company_name, str(trade_date), fingerprint)
             args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
 
         if checkpoint_enabled and resume_step is not None:
@@ -664,6 +716,19 @@ class TradingAgentsGraph:
         """Persist a completed run and clear its checkpoint."""
         self.curr_state = final_state
 
+        # 评级 + 来源：来源必须随决策一起落盘，否则下游只看到一个字符串，
+        # 无法区分"模型建议持有"与"评级没解析出来、落到了默认值"。
+        decision_text = final_state["final_trade_decision"]
+        rating, rating_source = self.signal_processor.process_signal_detail(decision_text)
+        final_state["rating_source"] = rating_source
+        if rating_source == SOURCE_FALLBACK:
+            logger.warning(
+                "Rating fell back to %r for %s on %s: no 5-tier rating found in the "
+                "final decision (format=%s). Downstream must not treat this as a real Hold.",
+                rating, company_name, trade_date,
+                final_state.get("final_decision_format", "unknown"),
+            )
+
         # Log state to disk.
         self._log_state(trade_date, final_state)
 
@@ -671,16 +736,18 @@ class TradingAgentsGraph:
         self.memory_log.store_decision(
             ticker=company_name,
             trade_date=trade_date,
-            final_trade_decision=final_state["final_trade_decision"],
+            final_trade_decision=decision_text,
+            rating_source=rating_source,
         )
 
         # Clear checkpoint on successful completion to avoid stale state.
         if self.config.get("checkpoint_enabled"):
             clear_checkpoint(
-                self.config["data_cache_dir"], company_name, str(trade_date)
+                self.config["data_cache_dir"], company_name, str(trade_date),
+                self._run_fingerprint(),
             )
 
-        return self.process_signal(final_state["final_trade_decision"])
+        return rating
 
     def close_graph_run(self) -> None:
         """Close the active checkpointer context, if any."""

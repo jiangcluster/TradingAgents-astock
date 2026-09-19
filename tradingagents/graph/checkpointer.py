@@ -25,8 +25,16 @@ def _db_path(data_dir: str | Path, ticker: str) -> Path:
     return p / f"{safe}.db"
 
 
-def thread_id(ticker: str, date: str) -> str:
-    """Deterministic thread ID for a ticker+date pair."""
+def thread_id(ticker: str, date: str, fingerprint: str = "") -> str:
+    """Deterministic thread ID for a ticker+date pair (+ run-config fingerprint).
+
+    ``fingerprint`` 是本次运行的配置摘要（模型 / provider / 分析师集合等）。只用
+    (ticker, date) 做 key 时，**换了模型或改了分析师集合后重跑同一天会命中旧断点**
+    并静默续用旧状态——已完成阶段用旧模型、剩余阶段用新模型，报告里完全看不出来；
+    上一次报错（而非崩溃）留下的断点也会被当成续跑点。空串保持旧行为（老断点仍可读）。
+    """
+    if fingerprint:
+        return hashlib.sha256(f"{ticker.upper()}:{date}:{fingerprint}".encode()).hexdigest()[:16]
     return hashlib.sha256(f"{ticker.upper()}:{date}".encode()).hexdigest()[:16]
 
 
@@ -43,17 +51,19 @@ def get_checkpointer(data_dir: str | Path, ticker: str) -> Generator[SqliteSaver
         conn.close()
 
 
-def has_checkpoint(data_dir: str | Path, ticker: str, date: str) -> bool:
+def has_checkpoint(data_dir: str | Path, ticker: str, date: str, fingerprint: str = "") -> bool:
     """Check whether a resumable checkpoint exists for ticker+date."""
-    return checkpoint_step(data_dir, ticker, date) is not None
+    return checkpoint_step(data_dir, ticker, date, fingerprint) is not None
 
 
-def checkpoint_step(data_dir: str | Path, ticker: str, date: str) -> int | None:
+def checkpoint_step(
+    data_dir: str | Path, ticker: str, date: str, fingerprint: str = ""
+) -> int | None:
     """Return the step number of the latest checkpoint, or None if none exists."""
     db = _db_path(data_dir, ticker)
     if not db.exists():
         return None
-    tid = thread_id(ticker, date)
+    tid = thread_id(ticker, date, fingerprint)
     with get_checkpointer(data_dir, ticker) as saver:
         config = {"configurable": {"thread_id": tid}}
         cp = saver.get_tuple(config)
@@ -73,12 +83,14 @@ def clear_all_checkpoints(data_dir: str | Path) -> int:
     return len(dbs)
 
 
-def clear_checkpoint(data_dir: str | Path, ticker: str, date: str) -> None:
+def clear_checkpoint(
+    data_dir: str | Path, ticker: str, date: str, fingerprint: str = ""
+) -> None:
     """Remove checkpoint for a specific ticker+date by deleting the thread's rows."""
     db = _db_path(data_dir, ticker)
     if not db.exists():
         return
-    tid = thread_id(ticker, date)
+    tid = thread_id(ticker, date, fingerprint)
     conn = sqlite3.connect(str(db))
     try:
         for table in ("writes", "checkpoints"):

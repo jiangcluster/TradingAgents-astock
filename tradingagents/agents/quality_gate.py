@@ -1,5 +1,9 @@
 from typing import Annotated
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 REPORT_FIELDS = {
     "market": "market_report",
     "social": "sentiment_report",
@@ -22,12 +26,20 @@ ANALYST_NAMES = {
 
 MIN_REPORT_LENGTH = 200
 
+# 取数失败的**实际文案**（数据层）+ 模型自己承认取不到的措辞。
+# ⚠️ 这份词表必须与数据层实际返回值对齐：a_stock 失败时返回的是
+# "K线数据获取失败：…" / "Error fetching hot stocks for …" / "…查询失败"，而原先
+# 只列了"无法获取"/"unable to fetch" —— 真正失败的报告反而认不出来（长报告里夹带
+# 一行失败信息时尤其明显，长度兜底管不到）。
 FAILURE_MARKERS = [
     "无法获取",
+    "获取失败",
+    "查询失败",
+    "工具调用失败",
     "I cannot retrieve",
     "I don't have access",
     "unable to fetch",
-    "工具调用失败",
+    "Error fetching",
 ]
 
 
@@ -69,12 +81,30 @@ def _active_analysts(state) -> list:
 
     未选中者不进图、报告必为空——若照旧一律判 F，选 1-3 个分析师时会凭空凑出 ≥4 个 F，
     反而把 LLM 复审整段跳过。故门控**只对已运行的分析师判级**。
-    状态里没有该字段（旧调用方/直接构造 state）时，退回"全部 7 项"，保持原行为。
+    状态里没有该字段（旧调用方/直接构造 state）时，退回"全部 7 项"，保持原行为并告警——
+    这种兜底本身是危险的（把没跑过的分析师当成"跑了但报告为空"），必须留下痕迹。
     """
     selected = state.get("selected_analysts")
     if not selected:
+        logger.warning(
+            "quality gate: state has no `selected_analysts`; grading all %d analyst "
+            "reports. Analysts that never ran will be graded F — check whether this "
+            "run really used all of them (old checkpoint / hand-built state?).",
+            len(REPORT_FIELDS),
+        )
         return list(REPORT_FIELDS)
     return [a for a in REPORT_FIELDS if a in set(selected)]
+
+
+def _should_skip_review(fail_count: int, graded: int) -> bool:
+    """超过半数**已运行**报告未通过硬检查时，跳过 LLM 复审。
+
+    原判据是硬编码的 ``fail_count >= 4``——它只在"7 个分析师全跑"时等价于"过半"。
+    分析师集合可变（1-7 个）时这个分母是错的：选 1 个、那 1 个又为空，按 ≥4 就不会
+    跳过（复审一份空报告没有意义），而退回"全部 7 项"的兜底又会凭空凑够 4 个 F。
+    改成按比例判断后，两种情形都归到同一语义上。
+    """
+    return graded > 0 and fail_count * 2 > graded
 
 
 def _build_review_prompt(
@@ -167,7 +197,7 @@ def create_quality_gate(llm):
         )
 
         llm_review = ""
-        if fail_count < 4:
+        if not _should_skip_review(fail_count, len(hard_results)):
             try:
                 review_prompt = _build_review_prompt(reports, trade_date, ticker, analysts)
                 response = llm.invoke(review_prompt)

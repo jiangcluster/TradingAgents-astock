@@ -10,8 +10,58 @@ to it.
 
 import pytest
 
-from tradingagents.agents.utils.rating import RATINGS_5_TIER, parse_rating
+from tradingagents.agents.utils.rating import (
+    RATINGS_5_TIER,
+    parse_rating,
+    parse_rating_with_source,
+)
 from tradingagents.graph.signal_processing import SignalProcessor
+
+
+# ---------------------------------------------------------------------------
+# 评级来源：区分"解析失败"与"真的是 Hold"
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestParseRatingWithSource:
+    def test_explicit_label_is_source_label(self):
+        assert parse_rating_with_source("Rating: Buy\n...") == ("Buy", "label")
+
+    def test_chinese_label_is_source_label(self):
+        assert parse_rating_with_source("最终评级：卖出") == ("Sell", "label")
+
+    def test_bare_word_is_source_bare(self):
+        assert parse_rating_with_source("Our view is overweight but unconfirmed.") == (
+            "Overweight", "bare"
+        )
+
+    def test_no_rating_word_falls_back_and_says_so(self):
+        """关键：解析失败必须能被识别。
+
+        自由文本回退路径下，终裁可能整篇没有评级词。此时返回值只是默认的 Hold，
+        若不带来源，下游会把"我们没读懂"当成"模型建议持有"——报告、账本、绩效
+        统计里都看不出来。
+        """
+        rating, source = parse_rating_with_source("Executive Summary: 情况复杂。")
+
+        assert rating == "Hold"
+        assert source == "fallback"
+
+    def test_none_input_does_not_raise(self):
+        """None 不该抛 AttributeError（此前会）。"""
+        assert parse_rating_with_source(None) == ("Hold", "fallback")
+
+    def test_parse_rating_keeps_returning_plain_string(self):
+        """旧接口的行为不变，避免影响既有调用方。"""
+        assert parse_rating("Rating: Sell") == "Sell"
+
+    def test_signal_processor_exposes_source(self):
+        processor = SignalProcessor()
+
+        assert processor.process_signal_detail("Rating: Buy") == ("Buy", "label")
+        assert processor.process_signal("Rating: Buy") == "Buy"
+        assert processor.process_signal_detail("")[1] == "fallback"
 
 
 # ---------------------------------------------------------------------------

@@ -129,31 +129,54 @@ def test_gate_grades_only_selected_analysts():
     assert llm.prompts, "门控应当执行 LLM 复审"
 
 
-def test_gate_still_reviews_when_only_selected_reports_fail():
-    """选 3 个且全部为空时 fail_count=3 < 4：必须仍然复审。
+def test_gate_reviews_when_minority_of_selected_reports_fail():
+    """3 个选中、其中 1 个为空 → 未过半，仍要复审。
 
-    修前按 7 项判级 → 7 个 F → 直接跳过复审，门控等于失效。
+    修前按 7 项判级：未选中者一律 F，凭空凑够 fail_count≥4 → 复审被跳过。
+    """
+    llm = FakeLLM()
+    node = qg.create_quality_gate(llm)
+
+    out = node(
+        _state(
+            selected_analysts=["market", "social", "news"],
+            market_report=FULL_REPORT,
+            sentiment_report=FULL_REPORT,
+        )
+    )["data_quality_summary"]
+    assert llm.prompts, "只有 1/3 未通过，不该跳过复审"
+    assert "门控复审不可用" not in out
+
+
+def test_gate_skips_review_when_majority_of_selected_reports_fail():
+    """3 个选中、全部为空 → 过半未通过，跳过复审并说明比例。
+
+    「跳过」的判据从硬编码的 `>= 4` 改成「超过半数已运行报告未通过」：原阈值只在
+    7 个分析师全跑时才等价于过半，分析师集合可变时分母是错的。
     """
     llm = FakeLLM()
     node = qg.create_quality_gate(llm)
 
     out = node(_state(selected_analysts=["market", "social", "news"]))["data_quality_summary"]
 
-    assert llm.prompts, "3 份 F 不该触发'跳过复审'"
-    assert "门控复审不可用" not in out
+    assert not llm.prompts, "过半报告未通过硬检查时不应再调用 LLM"
+    assert "门控复审不可用" in out
+    assert "3/3 份已运行报告未通过硬检查" in out
 
 
-def test_gate_skips_review_and_says_so_when_four_selected_reports_fail():
+def test_gate_skips_review_on_four_of_seven():
+    """7 个全跑、4 个未通过 → 跳过的边界与旧行为一致（4 是 7 的过半）。"""
     llm = FakeLLM()
     node = qg.create_quality_gate(llm)
-    selected = ["market", "social", "news", "fundamentals"]
+    state = _state(selected_analysts=list(qg.REPORT_FIELDS))
+    state["market_report"] = FULL_REPORT
+    state["sentiment_report"] = FULL_REPORT
+    state["news_report"] = FULL_REPORT
 
-    out = node(_state(selected_analysts=selected))["data_quality_summary"]
+    out = node(state)["data_quality_summary"]
 
-    assert not llm.prompts, "≥4 份未通过硬检查时不应再调用 LLM"
-    assert "门控复审不可用" in out
-    assert "4/4 份已运行报告未通过硬检查" in out
-    # 不能把"跳过复审"留空让下游误读成"数据没问题"
+    assert not llm.prompts
+    assert "4/7 份已运行报告未通过硬检查" in out
     assert "不要把「缺数据」当作「没有风险」" in out
 
 

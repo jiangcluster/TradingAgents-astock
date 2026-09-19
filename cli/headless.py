@@ -16,6 +16,8 @@
 输出（stdout 单行 JSON）：:
 
     {"code":"600362","date":"2026-09-02","decision":"Buy",
+     "rating_source":"label","final_decision_format":"structured",
+     "ta_version":"0.5.26","usage":{"llm_calls":37,"tokens_in":...,"tokens_out":...},
      "final_trade_decision":"...","investment_plan":"...",
      "analysis_detail":{
        "analyst_reports":{"market":"...","social":"...",...},
@@ -25,6 +27,9 @@
        "trader_investment_plan":"...",
        "risk_debate":{"history":"...","judge_decision":"...","rounds":2},
        "final_trade_decision":"..."}}
+
+`rating_source` / `final_decision_format` 用于区分"模型真的给了这个评级"与"评级没
+解析出来、落到了默认值"（`rating_source=fallback`）；`ta_version` 供下游做版本握手。
 
 ``analysis_detail`` 透传完整分析过程（7 分析师报告 / 多空辩论 / 风控辩论 / 裁决链），
 供下游（如深研报告）渲染深析详情；为空的分析师报告不透传。
@@ -38,6 +43,8 @@ import json
 import sys
 import tempfile
 from typing import List, Optional
+
+from tradingagents import __version__ as TA_VERSION
 
 from dotenv import load_dotenv
 
@@ -91,14 +98,28 @@ def run_headless(
     config: Optional[dict] = None,
 ) -> dict:
     """执行单票深析并返回结构化结果（不打印，供 CLI / 单测复用）。"""
+    from cli.stats_handler import StatsCallbackHandler
     from tradingagents.graph.trading_graph import TradingAgentsGraph
 
-    graph = TradingAgentsGraph(selected_analysts=analysts, debug=False, config=config)
+    # 用量统计：headless 是深研雷达的生产入口，此前不挂 callbacks，单票花了多少
+    # token 完全不可知（Web/交互 CLI 有统计，但只存在内存里、进程退出即丢）。
+    stats = StatsCallbackHandler()
+    graph = TradingAgentsGraph(
+        selected_analysts=analysts, debug=False, config=config, callbacks=[stats]
+    )
     final_state, decision = graph.propagate(code, date_str)
     return {
         "code": code,
         "date": date_str,
         "decision": decision if isinstance(decision, str) else str(decision),
+        # 评级来源：label / bare / fallback。fallback 表示终裁里**找不到任何评级词**，
+        # decision 只是解析器的默认值，下游不得当作真实判断（差别见 rating.py）。
+        "rating_source": str(final_state.get("rating_source", "")),
+        # 终裁形态：structured / freetext / freetext-fallback。
+        "final_decision_format": str(final_state.get("final_decision_format", "")),
+        # 版本握手：下游缓存与报告据此判断结论出自哪一版 TA。
+        "ta_version": TA_VERSION,
+        "usage": stats.get_stats(),
         "final_trade_decision": str(final_state.get("final_trade_decision", "")),
         "investment_plan": str(final_state.get("investment_plan", "")),
         "analysis_detail": _build_analysis_detail(final_state),

@@ -1092,13 +1092,20 @@ def run_analysis(checkpoint: bool = False):
         )
         update_display(layout, spinner_text, stats_handler=stats_handler, start_time=start_time)
 
-        # Initialize state and get graph args with callbacks
-        init_agent_state = graph.propagator.create_initial_state(
-            selections["ticker"], selections["analysis_date"]
+        # 走 prepare_graph_run，而不是直接 create_initial_state：checkpointer 只在
+        # prepare_graph_run 内挂载（config["checkpoint_enabled"] 也只在那里生效），
+        # 之前直接建状态使得 `--checkpoint` 是个**没有效果的选项**；同一个函数还负责
+        # 注入 past_context 与本次实际进图的分析师名单。
+        init_agent_state, args, resume_step = graph.prepare_graph_run(
+            selections["ticker"],
+            selections["analysis_date"],
+            callbacks=[stats_handler],
         )
-        # Pass callbacks to graph config for tool execution tracking
-        # (LLM tracking is handled separately via LLM constructor)
-        args = graph.propagator.get_graph_args(callbacks=[stats_handler])
+        if resume_step is not None:
+            console.print(
+                f"[yellow]Resuming {selections['ticker']} from checkpoint step "
+                f"{resume_step}[/yellow]"
+            )
 
         # Stream the analysis
         trace = []
@@ -1201,9 +1208,20 @@ def run_analysis(checkpoint: bool = False):
 
             trace.append(chunk)
 
-        # Get final state and decision
+        # Get final state and decision.
+        # 收尾必须走 finalize_graph_run：它负责落盘 full_states_log、写记忆日志、
+        # 并在成功时清理断点。此前直接 process_signal 把这三件事全绕过了——
+        # 交互式 CLI 跑的每次分析都不进记忆，断点也永远清不掉。
+        if not trace:
+            graph.close_graph_run()
+            raise RuntimeError("分析没有返回任何结果，请清理断点后重试。")
         final_state = trace[-1]
-        decision = graph.process_signal(final_state["final_trade_decision"])
+        try:
+            graph.finalize_graph_run(
+                selections["ticker"], selections["analysis_date"], final_state
+            )
+        finally:
+            graph.close_graph_run()
 
         # Update all agent statuses to completed
         for agent in message_buffer.agent_status:

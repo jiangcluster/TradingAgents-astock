@@ -1,5 +1,6 @@
 """Test checkpoint resume: crash mid-analysis, re-run resumes from last node."""
 
+import functools
 import sqlite3
 import tempfile
 import unittest
@@ -145,10 +146,28 @@ class TestCheckpointResume(unittest.TestCase):
         self.assertTrue(has_checkpoint(self.tmpdir, self.ticker, self.date))
 
     def test_trading_graph_prepare_uses_none_input_when_resuming(self):
-        """TradingAgentsGraph must resume with None input, not a fresh state."""
+        """TradingAgentsGraph must resume with None input, not a fresh state.
+
+        断点 key 现在含"配置指纹"（模型 / 分析师集合等），所以造断点时必须用同一
+        指纹——否则配置一变就被当成新跑，正是要防的静默续跑。
+        """
         global _should_crash
         builder = _build_graph()
-        tid = thread_id(self.ticker, self.date)
+
+        fake_graph = MagicMock()
+        fake_graph.config = {
+            "checkpoint_enabled": True,
+            "data_cache_dir": self.tmpdir,
+        }
+        fake_graph.selected_analysts = ["market"]
+        # MagicMock 会把 _run_fingerprint 变成子 mock（返回另一个 MagicMock），
+        # 指纹里就会带上随机的 mock id。必须绑到真实实现上。
+        fake_graph._run_fingerprint = functools.partial(
+            TradingAgentsGraph._run_fingerprint, fake_graph
+        )
+        tid = thread_id(
+            self.ticker, self.date, TradingAgentsGraph._run_fingerprint(fake_graph)
+        )
         cfg = {"configurable": {"thread_id": tid}}
 
         _should_crash = True
@@ -157,11 +176,6 @@ class TestCheckpointResume(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 graph.invoke({"count": 0}, config=cfg)
 
-        fake_graph = MagicMock()
-        fake_graph.config = {
-            "checkpoint_enabled": True,
-            "data_cache_dir": self.tmpdir,
-        }
         fake_graph.workflow = builder
         fake_graph._checkpointer_ctx = None
         fake_graph.propagator.get_graph_args.return_value = {
@@ -179,6 +193,60 @@ class TestCheckpointResume(unittest.TestCase):
         self.assertEqual(step, 1)
         self.assertEqual(args["config"]["configurable"]["thread_id"], tid)
         fake_graph.propagator.create_initial_state.assert_not_called()
+
+        TradingAgentsGraph.close_graph_run(fake_graph)
+
+    def test_config_change_does_not_resume_stale_checkpoint(self):
+        """换了模型/分析师集合后重跑同一天 → 视为新跑，不得续用旧状态。
+
+        旧实现只用 (ticker, date) 做 key：改配置后重跑会静默接着旧断点跑，
+        已完成阶段用旧模型、剩余阶段用新模型，报告里完全看不出来。
+        """
+        global _should_crash
+        builder = _build_graph()
+
+        fake_graph = MagicMock()
+        fake_graph.config = {
+            "checkpoint_enabled": True,
+            "data_cache_dir": self.tmpdir,
+            "deep_think_llm": "model-a",
+        }
+        fake_graph.selected_analysts = ["market"]
+        fake_graph._run_fingerprint = functools.partial(
+            TradingAgentsGraph._run_fingerprint, fake_graph
+        )
+
+        _should_crash = True
+        with get_checkpointer(self.tmpdir, self.ticker) as saver:
+            graph = builder.compile(checkpointer=saver)
+            with self.assertRaises(RuntimeError):
+                graph.invoke(
+                    {"count": 0},
+                    config={
+                        "configurable": {
+                            "thread_id": thread_id(
+                                self.ticker, self.date,
+                                TradingAgentsGraph._run_fingerprint(fake_graph),
+                            )
+                        }
+                    },
+                )
+
+        # 换模型后配置指纹改变
+        fake_graph.config = dict(fake_graph.config, deep_think_llm="model-b")
+        fake_graph.workflow = builder
+        fake_graph._checkpointer_ctx = None
+        fake_graph.propagator.get_graph_args.return_value = {"config": {}}
+        fake_graph.propagator.create_initial_state.return_value = {"count": 0}
+
+        init_state, args, step = TradingAgentsGraph.prepare_graph_run(
+            fake_graph,
+            self.ticker,
+            self.date,
+        )
+
+        self.assertIsNone(step, "配置变了却仍然命中旧断点")
+        self.assertIsNotNone(init_state, "配置变了必须重建初始状态（开新跑）")
 
         TradingAgentsGraph.close_graph_run(fake_graph)
 

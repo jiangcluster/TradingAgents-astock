@@ -145,5 +145,8 @@ def test_optional_tool_call_returning_none_still_falls_back_to_free_text():
 
     out = invoke_structured_or_freetext(structured, plain, "p", render, "Trader")
 
-    assert out == "free text fallback"
+    # 返回值现在是 (文本, 来源)：来源必须标成 freetext-fallback，否则调用方无法
+    # 区分"模型说了 Hold"与"结构化没拿到、我们退回了自由文本"。
+    assert out.text == "free text fallback"
+    assert out.format == "freetext-fallback"
     plain.invoke.assert_called_once()

@@ -6,8 +6,10 @@
 - **仓库**: https://github.com/simonlin1212/TradingAgents-astock
 - **协议**: Apache 2.0
 - **Python**: >=3.10
-- **当前版本**: 0.5.25（2026-09-19 发布）
-  ⚠️ 改版本号时**三处要一起改**：`pyproject.toml` / `CHANGELOG.md` / 这一行。漏了这行会让后续 agent 和发版流程读到旧版本（`tests/test_version_consistency.py` 会拦）。
+- **当前版本**: 0.5.26（2026-09-19 发布）
+  ⚠️ 改版本号时**四处要一起改**：`pyproject.toml` / `CHANGELOG.md` / 这一行 /
+  `tradingagents/__init__.py` 的 `__version__`（headless JSON 的 `ta_version` 取自它，
+  下游靠它做版本握手）。漏任何一处 `tests/test_version_consistency.py` 会拦。
 
 ## 架构
 
@@ -69,26 +71,70 @@ v0.2.5 起完全移除 akshare 依赖，所有数据通过直连 HTTP API 获取
 没披露"长得一样），故 v0.5.25 把工具层 `curr_date` 改为必填，且缺省时报告头显式告警。
 **改完这类防护要枚举所有收日期的接口逐个实测，别从设计推断覆盖面。**
 
-### 共享缓存并发（v0.5.25 新增）
-`data_cache_dir` 下的 CSV 是**多个 TA 子进程共享**的（一次深析并发跑多只票）。两类写入
-各自有坑：OHLCV 整表覆盖用 `_atomic_write(path, write_fn)`（临时文件 + `os.replace`，
-否则并发读者会拿到截断的 CSV）；北向 / 资金流缓存是**读-改-写**，原子替换挡不住丢
-更新（两进程各读到同一份旧表，后写的覆盖先写的行），必须再套 `_cache_lock(path)`
-（`O_CREAT|O_EXCL` 锁文件 + 超时，残留锁按 mtime 超龄接管，**抢不到锁退化为无锁读写**
-而不是报错）。判断缓存"是不是今天的"一律用 `_market_today()`（Asia/Shanghai），**不要
-用主机本地时区**——主机在 UTC+8 以西会把当天缓存当隔日重抓，以东会把昨天的缓存当今天
-复用（少一根日线）。
+### 统一落盘与并发（v0.5.25 新增，v0.5.26 抽出共享模块）
+`tradingagents/utils/atomic_io.py` 提供两个原语，**任何落盘都要用它**，不要再各写一套：
+- `atomic_write(path, write_fn)`：临时文件 + `os.replace`。整表覆盖（OHLCV 缓存、记忆
+  日志）必须走它，否则并发读者会拿到截断内容。
+- `file_lock(path)`：`O_CREAT|O_EXCL` 锁文件 + 超时，残留锁按 mtime 超龄接管，**抢不到
+  锁退化为无锁执行**（yield False）而不是抛错。**读-改-写必须持锁**——原子替换只保证
+  "读不到半截"，挡不住丢更新（两进程各读到同一份旧内容，后写的整体覆盖先写的）。
+  适用：北向/资金流缓存、记忆日志、任何 `read → 改 → 写回` 的文件。
 
-### 质量门控的作用域与降级（v0.5.25 修正）
+`data_cache_dir` 下的 CSV 是多个 TA 子进程共享的。判断缓存"是不是今天的"一律用
+`_market_today()`（Asia/Shanghai），**不要用主机本地时区**——主机在 UTC+8 以西会把当天
+缓存当隔日重抓，以东会把昨天的缓存当今天复用（少一根日线）。`a_stock` 的
+`_cache_lock` / `_atomic_write` 只是本层别名，新代码直接用 `atomic_io`。
+
+### 决策输出契约：评级来源 + 版本（v0.5.26 新增，改 PM/输出字段必读）
+"模型说了 Hold"与"我们没解析出评级、落到了默认 Hold"必须在数据上可区分——否则一次
+解析失败会静默变成一次看多的中性结论，报告、账本、下游决策里都看不出来。
+
+- `parse_rating()` 只返回评级；需要知道来源时用 `parse_rating_with_source()`，
+  第二项 ∈ `label`（显式标签）/ `bare`（正文裸词）/ **`fallback`（一个都没找到，
+  返回值只是默认值）**。
+- `invoke_structured_or_freetext()` 返回 `RenderedOutput(text, format)`——format ∈
+  `structured` / `freetext` / `freetext-fallback`。**不要只取 text 丢掉 format**。
+- 两者落进 state：`final_decision_format`（PM 写）、`rating_source`（`finalize_graph_run`
+  写）。headless JSON 透出 `rating_source` / `final_decision_format` / `ta_version` / `usage`。
+- `memory.py` 在 `rating_source == "fallback"` 时把标签记为 `Unknown`，**不得**沿用
+  Hold；下游（深研）应把 `rating_source=fallback` 计入降权/失败，而不是当成观望。
+- `ta_version` 取自 `tradingagents/__version__`，用于下游缓存的版本握手——**改版本号
+  要四处同步**（见上文）。
+
+### 记忆结算的两道闸与数据源（v0.5.26 新增）
+`_fetch_returns()` 的口径直接影响反思质量与绩效统计，改之前先读这三条：
+- **基准行日期必须等于 `trade_date`**，否则拒绝结算（保持 pending 并打 warning）。
+  直接取 `iloc[0]` 会让停牌日/非交易日的窗口整体后移。
+- **未满 `memory_min_holding_days`（默认 5 交易日）不结算**。此前只要 ≥2 行就结算，
+  昨天做的决策今天再跑同一只票会拿 1 日收益当持有期收益回填。
+- **数据源是与决策同源的 a-stock**（个股日线 + 沪深300 指数，按日期对齐后算 alpha），
+  不再用 Yahoo。指数取数走 `a_stock.get_index_daily()`——指数前缀不能按个股规则推
+  （000xxx 在沪市、399xxx 在深市，见 `_index_prefix`）。
+
+### 断点续跑与计数值校验（v0.5.26 新增）
+- 断点 key = `(ticker, date, 配置指纹)`，指纹含 provider/模型/输出语言/轮数/分析师集合/
+  `role_llms`。**只按 (ticker, date) 认断点会让"换了模型"和"上次报错的断点"都被静默
+  续用**。改动与结果相关的配置项时，记得加进 `_run_fingerprint()`。
+- 计数值配置（`max_debate_rounds` / `max_risk_discuss_rounds` /
+  `max_tool_rounds_per_analyst` / `memory_holding_days` / `memory_min_holding_days`）
+  由 `_validate_count_configs()` 在启动时校验为 ≥1 的整数：设成 0 不会报错，只会让某段
+  流程悄悄消失（轮数 0 → Bear 永不发言）。**新增这类配置时一并加进该校验。**
+- 单个分析师的工具轮次上限是 `max_tool_rounds_per_analyst`（默认 12），超过即截断该
+  分析师。此前没有上限，唯一止损是全图 `recursion_limit`，撞上即整次运行作废。
+
+### 质量门控的作用域与降级（v0.5.25 修正，v0.5.26 改判据）
 `agents/quality_gate.py` 位于「分析师 → 多空辩论」之间，结论 `data_quality_summary` 会流向
-牛熊研究员、研究主管、交易员、风控三方与组合经理。两条硬约束：
+牛熊研究员、研究主管、交易员、风控三方与组合经理。三条硬约束：
 
 - **只对本次进图的分析师判级**（`_active_analysts(state)` 读 `state["selected_analysts"]`）。
-  `selected_analysts` 可以只选 1-3 个，未选中者报告必为空——按全部 7 项判级会凭空凑够
-  `fail_count >= 4` 把 LLM 复审**自己关掉**（选得越少越容易触发）。字段缺失时退回全部 7 项，
-  保持旧调用方行为。
-- **复审没跑必须说出来**。`fail_count >= 4` 时不能静默留空——"没复审"与"数据没问题"
-  长得一模一样，下游会把「缺数据」读成「没有风险」。
+  `selected_analysts` 可以只选 1-3 个，未选中者报告必为空——按全部 7 项判级会凭空凑 F
+  把 LLM 复审**自己关掉**（选得越少越容易触发）。字段缺失时退回全部 7 项并打 warning。
+- **跳过复审的判据是"超过半数已运行报告未通过"**（`_should_skip_review`），不是硬编码的
+  `>= 4`——后者只在 7 个分析师全跑时才等价于过半。
+- **复审没跑必须说出来**。跳过时不能静默留空——"没复审"与"数据没问题"长得一模一样，
+  下游会把「缺数据」读成「没有风险」。
+- `FAILURE_MARKERS` **必须与数据层实际失败文案对齐**（a_stock 返回的是"K线数据获取失败…"
+  / "Error fetching …"，不是"无法获取"）。改数据层错误文案时同步更新这张词表。
 
 ⚠️ **`selected_analysts` 是显式字段，不是从报告是否为空反推的**：空报告既能表示"没选中"、
 也能表示"选了但没写成"，反推必然误判。新增受该开关控制的分析师时，同步更新

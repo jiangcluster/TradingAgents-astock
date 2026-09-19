@@ -122,13 +122,14 @@ def create_portfolio_manager(llm):
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{_NO_LEVELS_RULE}{get_language_instruction()}"""
 
-        final_trade_decision = invoke_structured_or_freetext(
+        rendered = invoke_structured_or_freetext(
             structured_llm,
             llm,
             prompt,
             render_pm_decision,
             "Portfolio Manager",
         )
+        final_trade_decision = rendered.text
 
         new_risk_debate_state = {
             "judge_decision": final_trade_decision,
@@ -146,6 +147,9 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
         return {
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
+            # 终裁是结构化产出还是自由文本：自由文本不保证带 `**Rating**:` 标签，
+            # 丢了这条信息，下游无法区分"模型说了 Hold"与"我们没解析出评级"。
+            "final_decision_format": rendered.format,
         }
 
     return portfolio_manager_node
