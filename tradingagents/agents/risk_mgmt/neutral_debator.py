@@ -18,6 +18,9 @@ def create_neutral_debator(llm):
         lockup_report = state.get("lockup_report", "")
 
         trader_decision = state["trader_investment_plan"]
+        # 研究经理的原始立场：风控三方此前只看到交易员压缩后的 3 档 action，
+        # 看不到研究层的 5 档评级与论证强度，容易对"已打折的信息"再表态。
+        research_plan = state.get("investment_plan", "")
 
         prompt = f"""As the Neutral Risk Analyst evaluating an A-share (China mainland) stock, your role is to provide a balanced perspective, weighing both the potential benefits and risks. Factor in A-share market structure, broader trends, and diversification strategies.
 
@@ -33,6 +36,10 @@ A-Share Neutral Framework — use these China-specific balancing considerations:
 Here is the trader's decision:
 
 {trader_decision}
+
+The Research Manager's original stance (5-tier rating + rationale) — the trader's action is a compressed view of it, so check the two against each other rather than debating the summary alone:
+
+{research_plan}
 
 Challenge both the aggressive and conservative analysts. Point out where each perspective is overly optimistic or overly cautious in the A-share context. Use these data sources:
 

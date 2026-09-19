@@ -16,6 +16,9 @@ def create_research_manager(llm):
     def research_manager_node(state) -> dict:
         instrument_context = build_instrument_context(state["company_of_interest"])
         history = state["investment_debate_state"].get("history", "")
+        # 数据质量门控结论：此前只进牛熊两个研究员，研究经理看不到——
+        # 导致 investment_plan 可能建立在被判 D/F 的报告之上而无任何提示。
+        quality = state.get("data_quality_summary", "")
 
         investment_debate_state = state["investment_debate_state"]
 
@@ -35,6 +38,9 @@ Note: This is an A-share (China mainland) stock. Factor in regulatory policy imp
 - **Sell**: Strong conviction in the bear thesis; recommend exiting or avoiding the position
 
 Commit to a clear stance whenever the debate's strongest arguments warrant one; reserve Hold for situations where the evidence on both sides is genuinely balanced.
+
+**Data Quality Context** (weigh it when judging arguments; a claim built on a D/F report is weak evidence):
+{quality if quality else "（本次无数据质量门控结论）"}
 
 ---
 

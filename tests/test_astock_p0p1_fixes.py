@@ -20,6 +20,11 @@ import requests
 from tradingagents.dataflows import a_stock
 
 
+# 走实时分支的测试必须用"市场当天"：写死的日期一旦成为过去，数据层会按
+# 未来函数防护略去实时段，这些用例就测不到原本要测的逻辑了。
+TRADE_DATE = a_stock._market_today().isoformat()
+
+
 class FakeResp:
     """最小 response 替身：json() / text / status_code / raise_for_status()。"""
 
@@ -333,7 +338,7 @@ def test_northbound_truncated_sgt_not_added_to_total(monkeypatch, tmp_path):
     """sgt 仅 35 点而 time 有 262 点 → 视为不可用，Total 仅计 HGT。"""
     _patch_hsgt(monkeypatch, tmp_path, _hsgt_payload(n_times=262, n_sgt=35))
 
-    out = a_stock.get_northbound_flow("2026-09-06")
+    out = a_stock.get_northbound_flow(TRADE_DATE)
 
     assert "SGT(深股通)=N/A(上游盘中停更)" in out
     assert "Total(仅HGT)=-9.28亿" in out
@@ -346,7 +351,7 @@ def test_northbound_full_sgt_included_in_total(monkeypatch, tmp_path):
     _patch_hsgt(monkeypatch, tmp_path,
                 _hsgt_payload(n_times=10, n_sgt=10, hgt_last=-9.28, sgt_last=5.00))
 
-    out = a_stock.get_northbound_flow("2026-09-06")
+    out = a_stock.get_northbound_flow(TRADE_DATE)
 
     assert "SGT(深股通)=5.00亿" in out
     assert "Total=-4.28亿" in out
@@ -356,7 +361,7 @@ def test_northbound_truncated_sgt_cached_as_nan(monkeypatch, tmp_path):
     """缓存须写 nan 占位而非 0，避免把「缺数据」当「净流入 0 亿」污染历史均值。"""
     path = _patch_hsgt(monkeypatch, tmp_path, _hsgt_payload(n_times=262, n_sgt=35))
 
-    a_stock.get_northbound_flow("2026-09-06")
+    a_stock.get_northbound_flow(TRADE_DATE)
 
     text = path.read_text(encoding="utf-8")
     assert text.strip().splitlines()[-1].endswith(",nan")
@@ -370,7 +375,7 @@ def test_northbound_history_nan_row_shown_as_na(monkeypatch, tmp_path):
         encoding="utf-8",
     )
 
-    out = a_stock.get_northbound_flow("2026-09-06", include_history=True)
+    out = a_stock.get_northbound_flow(TRADE_DATE, include_history=True)
 
     assert "2026-09-02: HGT=-9.28 SGT=N/A Total=-9.28" in out
     # 均值口径：nan 行仅按 HGT 计 → (6.0 + (-9.28) + 3.0) / 3 = -0.09
@@ -380,7 +385,7 @@ def test_northbound_history_nan_row_shown_as_na(monkeypatch, tmp_path):
 def test_northbound_empty_realtime_no_crash(monkeypatch, tmp_path):
     _patch_hsgt(monkeypatch, tmp_path, {"time": [], "hgt": [], "sgt": []})
 
-    out = a_stock.get_northbound_flow("2026-09-06")
+    out = a_stock.get_northbound_flow(TRADE_DATE)
 
     assert "No realtime data" in out
 

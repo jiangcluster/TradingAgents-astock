@@ -64,12 +64,27 @@ def _hard_check_report(analyst_type: str, report: str) -> tuple:
     return ("A", f"完整 ({length} chars)")
 
 
+def _active_analysts(state) -> list:
+    """本次实际进图的分析师键（按 REPORT_FIELDS 顺序）。
+
+    未选中者不进图、报告必为空——若照旧一律判 F，选 1-3 个分析师时会凭空凑出 ≥4 个 F，
+    反而把 LLM 复审整段跳过。故门控**只对已运行的分析师判级**。
+    状态里没有该字段（旧调用方/直接构造 state）时，退回"全部 7 项"，保持原行为。
+    """
+    selected = state.get("selected_analysts")
+    if not selected:
+        return list(REPORT_FIELDS)
+    return [a for a in REPORT_FIELDS if a in set(selected)]
+
+
 def _build_review_prompt(
-    reports: dict, trade_date: str, ticker: str
+    reports: dict, trade_date: str, ticker: str, analysts: list = None
 ) -> str:
     """Build the LLM review prompt."""
+    analysts = analysts if analysts is not None else list(REPORT_FIELDS)
     report_sections = []
-    for analyst_type, field in REPORT_FIELDS.items():
+    for analyst_type in analysts:
+        field = REPORT_FIELDS[analyst_type]
         name = ANALYST_NAMES[analyst_type]
         content = reports.get(field, "（未运行）")
         if not content:
@@ -80,7 +95,11 @@ def _build_review_prompt(
 
     all_reports = "\n\n".join(report_sections)
 
-    return f"""你是数据质量审核员。以下是 7 位分析师对 {ticker} 在 {trade_date} 的研究报告。请逐一审核。
+    rows = "\n".join(
+        f"| {ANALYST_NAMES[a]} | A/B/C/D/F | 是否匹配交易日 | 列出缺失的必采项 | 简要说明 |"
+        for a in analysts
+    )
+    return f"""你是数据质量审核员。以下是本次实际运行的 {len(analysts)} 位分析师对 {ticker} 在 {trade_date} 的研究报告。请逐一审核。
 
 {all_reports}
 
@@ -94,13 +113,7 @@ def _build_review_prompt(
 
 | 分析师 | 评级 | 数据时效 | 缺失项 | 备注 |
 |--------|------|----------|--------|------|
-| 技术分析师 | A/B/C/D/F | 是否匹配交易日 | 列出缺失的必采项 | 简要说明 |
-| 情绪分析师 | ... | ... | ... | ... |
-| 新闻分析师 | ... | ... | ... | ... |
-| 基本面分析师 | ... | ... | ... | ... |
-| 政策分析师 | ... | ... | ... | ... |
-| 游资追踪师 | ... | ... | ... | ... |
-| 解禁监控师 | ... | ... | ... | ... |
+{rows}
 
 **整体评级**: A/B/C/D/F
 **数据可信度**: 高/中/低
@@ -127,12 +140,15 @@ def create_quality_gate(llm):
         trade_date = state["trade_date"]
         ticker = state["company_of_interest"]
 
+        analysts = _active_analysts(state)
+
         reports = {}
         for analyst_type, field in REPORT_FIELDS.items():
             reports[field] = state.get(field, "")
 
         hard_results = {}
-        for analyst_type, field in REPORT_FIELDS.items():
+        for analyst_type in analysts:
+            field = REPORT_FIELDS[analyst_type]
             grade, detail = _hard_check_report(analyst_type, reports[field])
             hard_results[analyst_type] = (grade, detail)
 
@@ -140,6 +156,10 @@ def create_quality_gate(llm):
         for analyst_type, (grade, detail) in hard_results.items():
             name = ANALYST_NAMES[analyst_type]
             hard_summary_lines.append(f"- {name}: [{grade}] {detail}")
+        skipped = [a for a in REPORT_FIELDS if a not in set(analysts)]
+        for analyst_type in skipped:
+            name = ANALYST_NAMES[analyst_type]
+            hard_summary_lines.append(f"- {name}: [—] 未运行（本次未选中，不计入质量评级）")
         hard_summary = "\n".join(hard_summary_lines)
 
         fail_count = sum(
@@ -149,18 +169,33 @@ def create_quality_gate(llm):
         llm_review = ""
         if fail_count < 4:
             try:
-                review_prompt = _build_review_prompt(reports, trade_date, ticker)
+                review_prompt = _build_review_prompt(reports, trade_date, ticker, analysts)
                 response = llm.invoke(review_prompt)
                 llm_review = response.content
             except Exception as e:
                 llm_review = f"（LLM 复审失败: {type(e).__name__}: {e}）"
+        else:
+            # 显式说明"复审不可用"而不是静默留空：下游必须知道这不是"数据没问题"
+            bad = "、".join(
+                ANALYST_NAMES[a] for a, (g, _) in hard_results.items() if g in ("F", "D")
+            )
+            llm_review = (
+                f"（**门控复审不可用**：{fail_count}/{len(hard_results)} 份已运行报告未通过硬检查"
+                f"（{bad}），已跳过 LLM 复审。上述报告的可信度未经复核，"
+                f"下游应主动降权使用，不要把「缺数据」当作「没有风险」。）"
+            )
 
+        scope_line = (
+            f"**审核范围**: 本次运行 {len(analysts)} 位分析师"
+            + (f"（另 {len(skipped)} 位未选中，未计入评级）" if skipped else "")
+        )
         summary = (
             f"## 数据质量门控结果\n\n"
-            f"**标的**: {ticker} | **交易日**: {trade_date}\n\n"
+            f"**标的**: {ticker} | **交易日**: {trade_date}\n"
+            f"{scope_line}\n\n"
             f"### 硬检查结果\n{hard_summary}\n\n"
             f"### LLM 复审\n"
-            f"{llm_review if llm_review else '（跳过 — 多数报告未通过硬检查）'}\n"
+            f"{llm_review if llm_review else '（未执行）'}\n"
         )
 
         return {"data_quality_summary": summary}

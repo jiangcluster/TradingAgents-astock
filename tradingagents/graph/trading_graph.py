@@ -175,6 +175,8 @@ class TradingAgentsGraph:
         self.debug = debug
         self.config = merge_config(config)
         self.callbacks = callbacks or []
+        # 本次实际进图的分析师键：注入状态供数据质量门控只对已运行者判级（见 quality_gate）
+        self.selected_analysts = list(selected_analysts or [])
 
         # Update the interface's config
         set_config(self.config)
@@ -296,7 +298,9 @@ class TradingAgentsGraph:
             resolve_llm=self.role_llms.get,
         )
 
-        self.propagator = Propagator()
+        self.propagator = Propagator(
+            max_recur_limit=self.config.get("max_recur_limit", 100)
+        )
         self.reflector = Reflector(self.quick_thinking_llm)
         self.signal_processor = SignalProcessor(self.quick_thinking_llm)
 
@@ -651,7 +655,8 @@ class TradingAgentsGraph:
         # LangGraph would start a new run and replay completed nodes.
         past_context = self.memory_log.get_past_context(company_name)
         init_agent_state = self.propagator.create_initial_state(
-            company_name, trade_date, past_context=past_context
+            company_name, trade_date, past_context=past_context,
+            selected_analysts=self.selected_analysts,
         )
         return init_agent_state, args, resume_step
 

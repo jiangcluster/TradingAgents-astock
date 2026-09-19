@@ -55,7 +55,7 @@ def create_hot_money_tracker(llm):
             "\n- `get_insider_transactions`：获取股东和内部人交易数据"
             "\n- `get_hot_stocks(curr_date)`：获取当日涨停股 + 题材归因 reason tags（同花顺独家）"
             "\n- `get_northbound_flow(curr_date)`：获取北向资金实时分钟级流向（沪股通+深股通累计净买入）"
-            "\n- `get_concept_blocks(ticker)`：获取个股所属概念板块/行业分类/地域（百度股市通，含当日涨幅）"
+            "\n- `get_concept_blocks(ticker, curr_date)`：获取个股所属概念板块/行业分类/地域（百度股市通，含当日涨幅；curr_date 传当前分析日期，复盘历史时数据层会提示涨幅非当日值）"
             "\n- `get_fund_flow(ticker, curr_date)`：获取个股主力/散户资金流向（分钟级实时+20日历史，超大单/大单/中单/小单净流入）"
             "\n- `get_dragon_tiger_board(ticker, curr_date)`：获取龙虎榜上榜记录、买卖席位明细（营业部）、机构参与情况"
             "\n- `get_industry_comparison(ticker, curr_date)`：获取全行业横向对比（90个行业涨跌幅/成交额/净流入排名，判断板块轮动）"

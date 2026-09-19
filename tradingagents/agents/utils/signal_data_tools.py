@@ -68,18 +68,24 @@ def get_northbound_flow(
 @tool
 def get_concept_blocks(
     ticker: Annotated[str, "A-stock code (e.g. 688017)"],
+    curr_date: Annotated[
+        str, "Analysis date YYYY-MM-DD; flags look-ahead when the date is historical"
+    ] = "",
 ) -> str:
     """
     Retrieve concept/sector/region blocks that a stock belongs to.
     Shows industry (申万), concept themes (e.g. 机器人概念, 减速器), and region.
-    Each block includes current day's change percentage.
+    Each block includes the change percentage at retrieval time — a live
+    snapshot, so pass curr_date and the data layer will flag it when you are
+    replaying a historical date.
     Uses the configured signal_data vendor.
     Args:
         ticker (str): A-stock code
+        curr_date (str): Analysis date, YYYY-MM-DD (pass the trade date)
     Returns:
         str: Concept and sector block membership with daily changes
     """
-    return route_to_vendor("get_concept_blocks", ticker)
+    return route_to_vendor("get_concept_blocks", ticker, curr_date)
 
 
 @tool

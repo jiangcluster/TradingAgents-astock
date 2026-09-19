@@ -18,6 +18,9 @@ def create_aggressive_debator(llm):
         lockup_report = state.get("lockup_report", "")
 
         trader_decision = state["trader_investment_plan"]
+        # 研究经理的原始立场：风控三方此前只看到交易员压缩后的 3 档 action，
+        # 看不到研究层的 5 档评级与论证强度，容易对"已打折的信息"再表态。
+        research_plan = state.get("investment_plan", "")
 
         prompt = f"""As the Aggressive Risk Analyst evaluating an A-share (China mainland) stock, your role is to champion high-reward opportunities and bold strategies. Focus on the potential upside, growth potential, and momentum—even when these come with elevated risk. Counter the conservative and neutral analysts with data-driven rebuttals.
 
@@ -32,6 +35,10 @@ A-Share Aggressive Framework — leverage these China-specific upside arguments:
 Here is the trader's decision:
 
 {trader_decision}
+
+The Research Manager's original stance (5-tier rating + rationale) — the trader's action is a compressed view of it, so check the two against each other rather than debating the summary alone:
+
+{research_plan}
 
 Challenge the conservative and neutral stances. Demonstrate why their caution risks missing the opportunity. Use these data sources:
 

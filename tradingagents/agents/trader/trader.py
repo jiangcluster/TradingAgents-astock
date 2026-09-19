@@ -21,6 +21,14 @@ _NO_LEVELS_INSTRUCTION = (
 )
 
 
+def _clip(text: str, limit: int) -> str:
+    """截断长报告（Trader 只需决策相关要点，避免提示词被无关篇幅挤爆）。"""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...（已截断，完整内容见分析师报告）"
+
+
 def create_trader(llm):
     structured_llm = bind_structured(llm, TraderProposal, "Trader")
 
@@ -44,6 +52,26 @@ def create_trader(llm):
             astock_context_parts.append(f"Lockup Expiry / Insider Reduction Report:\n{lockup_report}")
         astock_context = "\n\n".join(astock_context_parts)
 
+        # 关键证据（截断）：此前 Trader 只拿到研究计划 + 上述三份报告，
+        # 技术面/基本面原文与整段多空辩论**从未进入"决定买/卖"这一步**，
+        # 提示词却声称"based on a comprehensive analysis by a team of analysts"。
+        evidence_parts = []
+        market_report = _clip(state.get("market_report", ""), 1500)
+        fundamentals_report = _clip(state.get("fundamentals_report", ""), 1500)
+        if market_report:
+            evidence_parts.append(f"Market / Technical Report:\n{market_report}")
+        if fundamentals_report:
+            evidence_parts.append(f"Fundamentals Report:\n{fundamentals_report}")
+        debate_history = _clip(
+            state.get("investment_debate_state", {}).get("history", ""), 2000
+        )
+        if debate_history:
+            evidence_parts.append(f"Bull/Bear Research Debate (truncated):\n{debate_history}")
+        quality = state.get("data_quality_summary", "")
+        if quality:
+            evidence_parts.append(f"Data Quality Gate:\n{_clip(quality, 1200)}")
+        evidence_context = "\n\n".join(evidence_parts)
+
         messages = [
             {
                 "role": "system",
@@ -63,7 +91,9 @@ def create_trader(llm):
                     "- Trading hours (Beijing time): call auction 09:15-09:25, continuous "
                     "09:30-11:30 / 13:00-14:57, closing auction 14:57-15:00, after-hours "
                     "fixed-price session 15:05-15:30 (all A-shares since 2026-07-06)\n"
-                    "Anchor your reasoning in the analysts' reports and the research plan. "
+                    "Anchor your reasoning in the analysts' reports and the research plan; if the "
+                    "key evidence below contradicts the plan, say so in the reasoning instead of "
+                    "silently following it. "
                     f"{_NO_LEVELS_INSTRUCTION} "
                     "（以上参数仅供技术研究参考，不构成投资建议）"
                 ),
@@ -71,11 +101,12 @@ def create_trader(llm):
             {
                 "role": "user",
                 "content": (
-                    f"Based on a comprehensive analysis by a team of analysts (including market, "
+                    f"Based on a comprehensive analysis by a team of analysts (market, "
                     f"sentiment, news, fundamentals, policy, capital flow, and lockup/reduction "
                     f"specialists), here is an investment plan for {company_name}.\n\n"
                     f"{instrument_context}\n\n"
                     f"Proposed Investment Plan:\n{investment_plan}\n\n"
+                    + (f"Key Analyst Evidence (truncated):\n{evidence_context}\n\n" if evidence_context else "")
                     + (f"Additional A-Stock Analyst Context:\n{astock_context}\n\n" if astock_context else "")
                     + "Leverage these insights to craft the transaction view."
                     + get_language_instruction()

@@ -18,6 +18,9 @@ def create_conservative_debator(llm):
         lockup_report = state.get("lockup_report", "")
 
         trader_decision = state["trader_investment_plan"]
+        # 研究经理的原始立场：风控三方此前只看到交易员压缩后的 3 档 action，
+        # 看不到研究层的 5 档评级与论证强度，容易对"已打折的信息"再表态。
+        research_plan = state.get("investment_plan", "")
 
         prompt = f"""As the Conservative Risk Analyst evaluating an A-share (China mainland) stock, your primary objective is to protect assets, minimize volatility, and ensure steady, reliable growth. Critically examine high-risk elements in the trader's plan, pointing out where it may expose the firm to undue risk.
 
@@ -33,6 +36,10 @@ A-Share Conservative Framework — emphasize these China-specific downside risks
 Here is the trader's decision:
 
 {trader_decision}
+
+The Research Manager's original stance (5-tier rating + rationale) — the trader's action is a compressed view of it, so check the two against each other rather than debating the summary alone:
+
+{research_plan}
 
 Counter the aggressive and neutral analysts. Highlight where their optimism overlooks A-share structural risks. Use these data sources:
 

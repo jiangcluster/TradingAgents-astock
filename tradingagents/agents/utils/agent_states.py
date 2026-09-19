@@ -62,6 +62,9 @@ class AgentState(MessagesState):
 
     # data quality gate
     data_quality_summary: Annotated[str, "Quality gate assessment of all analyst reports (hard checks + LLM review)"]
+    # 本次实际进图的分析师键（market/social/... 的子集）。门控据此**只对已运行的分析师判级**——
+    # 未选中的分析师若按空报告一律判 F，会在 7 项里凭空凑出 ≥4 个 F，反而把 LLM 复审整段跳过。
+    selected_analysts: Annotated[list, "Analyst keys actually included in this run"]
 
     # researcher team discussion step
     investment_debate_state: Annotated[

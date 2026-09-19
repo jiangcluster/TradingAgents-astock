@@ -239,6 +239,90 @@ def _snapshot_notice(curr_date: str, what: str) -> str:
     )
 
 
+def _date_is_after(value, cutoff) -> bool:
+    """时间戳（取日期部分）是否晚于 cutoff 日。
+
+    用于逐条剔除"分析日之后才发生"的条目（新闻、公告、解禁记录）。解析不了
+    的值返回 False——宁可留下，也不要因为格式意外把真实数据删光。
+    """
+    if not value or not cutoff:
+        return False
+    head = str(value).strip()[:10]
+    try:
+        datetime.strptime(head, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return head > str(cutoff).strip()[:10]
+
+
+@contextlib.contextmanager
+def _cache_lock(path: str, timeout: float = 10.0):
+    """共享缓存（CSV）的跨进程文件锁。
+
+    动因：一次深析会并发跑多个 TA 子进程，而北向/资金流这两份缓存是
+    **读-改-写**（在已有行基础上并入本次快照）。只用临时文件+os.replace
+    做到原子替换仍会丢更新——两个进程各自读到同一份旧表，后写的那个把先写的
+    行覆盖掉。行数越多越明显，且症状是"缓存里就是少几天"，很难追。
+
+    实现为 ``O_CREAT|O_EXCL`` 锁文件 + 超时；持锁进程被 kill 留下的残留锁
+    按 mtime 超龄接管。**抢不到锁不报错**：退化为无锁读改写（等于原行为），
+    缓存争用不该把整个取数流程打断。
+    """
+    lock_path = f"{path}.lock"
+    deadline = time.monotonic() + timeout
+    acquired = False
+    fd = None
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode("ascii", "ignore"))
+            acquired = True
+            break
+        except FileExistsError:
+            with contextlib.suppress(OSError):
+                if time.time() - os.path.getmtime(lock_path) > timeout * 6:
+                    os.unlink(lock_path)   # 残留锁（持锁进程已被杀）
+                    continue
+            if time.monotonic() >= deadline:
+                logger.warning("cache lock timeout, proceeding unlocked: %s", lock_path)
+                break
+            time.sleep(0.05)
+        except OSError:
+            break
+    try:
+        yield acquired
+    finally:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if acquired:
+            with contextlib.suppress(OSError):
+                os.unlink(lock_path)
+
+
+def _atomic_write(path: str, write_fn) -> None:
+    """临时文件 + ``os.replace`` 原子落盘。
+
+    并发深析下多个子进程会写同一份缓存；直接 ``to_csv(path)`` 在写一半时被
+    另一个进程读到，会得到截断的 CSV（pandas 报 ParserError 或静默少行）。
+    这里换成一个原子替换：读者要么看到旧文件，要么看到新文件。
+    """
+    import tempfile
+
+    dirname = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=dirname
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            write_fn(f)
+        os.replace(tmp_path, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+        raise
+
+
 # ---------------------------------------------------------------------------
 # mootdx client (singleton)
 # ---------------------------------------------------------------------------
@@ -1038,15 +1122,18 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
     cache_file = os.path.join(cache_dir, f"{code}-astock-daily.csv")
 
     if os.path.exists(cache_file):
-        mtime = datetime.fromtimestamp(os.path.getmtime(cache_file))
-        if mtime.date() == datetime.now().date():
+        mtime = datetime.fromtimestamp(os.path.getmtime(cache_file), _MARKET_TZ)
+        # 「今天」按 A 股市场时区判，不能用主机本地时区：主机在 UTC+8 以西时
+        # 当地还在前一天，当天抓的缓存会被当成隔日缓存再抓一遍；以东则相反，
+        # 把昨天的缓存当成今天的直接复用（少一根日线）。
+        if mtime.date() == _market_today():
             data = pd.read_csv(cache_file, on_bad_lines="skip", encoding="utf-8")
             data = _normalize_ohlcv_dates(data)
             data, supplemented = _supplement_stale_ohlcv_with_sina(
                 code, data, curr_date, start_date=None
             )
             if supplemented:
-                data.to_csv(cache_file, index=False, encoding="utf-8")
+                _atomic_write(cache_file, lambda f: data.to_csv(f, index=False))
             cutoff = pd.to_datetime(curr_date)
             return data[data["Date"] <= cutoff]
 
@@ -1093,8 +1180,8 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
 
     df, _ = _supplement_stale_ohlcv_with_sina(code, df, curr_date, start_date=None)
 
-    # Cache to disk
-    df.to_csv(cache_file, index=False, encoding="utf-8")
+    # Cache to disk（原子替换：并发深析时别的进程可能正读这份 CSV）
+    _atomic_write(cache_file, lambda f: df.to_csv(f, index=False))
 
     # Filter by curr_date to prevent look-ahead bias
     cutoff = pd.to_datetime(curr_date)
@@ -1453,6 +1540,18 @@ def _sina_stock_code(code: str) -> str:
     return f"{_get_prefix(code)}{code}"
 
 
+def _missing_curr_date_notice() -> str:
+    """未传分析日期时的显式告警。
+
+    时点截断完全依赖 curr_date；缺了它，分析日之后才披露的报告期会原样进入
+    表格，而报告里看不出任何异常（"未过滤"和"当时没披露"长得一模一样）。
+    """
+    return (
+        "⚠️ 未提供分析日期（curr_date）：无法剔除分析日之后才披露的报告期，"
+        "下表可能含未来财报数据，**不得**用于复盘历史。\n"
+    )
+
+
 def _get_financial_report_sina(
     code: str, report_type: str, freq: str, curr_date: str = None,
 ) -> pd.DataFrame:
@@ -1599,6 +1698,8 @@ def get_balance_sheet(
 
         header = f"# Balance Sheet for {code} (A-stock, {freq})\n"
         header += "# Data source: sina direct HTTP\n"
+        if not curr_date:
+            header += _missing_curr_date_notice()
         header += (
             f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         )
@@ -1630,6 +1731,8 @@ def get_cashflow(
 
         header = f"# Cash Flow for {code} (A-stock, {freq})\n"
         header += "# Data source: sina direct HTTP\n"
+        if not curr_date:
+            header += _missing_curr_date_notice()
         header += (
             f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         )
@@ -1661,6 +1764,8 @@ def get_income_statement(
 
         header = f"# Income Statement for {code} (A-stock, {freq})\n"
         header += "# Data source: sina direct HTTP\n"
+        if not curr_date:
+            header += _missing_curr_date_notice()
         header += (
             f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         )
@@ -1912,6 +2017,25 @@ def get_global_news(
             unique.append(n)
 
     news_str = ""
+    notice = ""
+    if _is_historical(curr_date):
+        # 这两个源只滚动"最新"条目，没有历史归档：先剔掉发布时间晚于分析日的
+        # 资讯（那是未来数据），剩下的若不足以形成当日新闻面，就明说而不是
+        # 拿今天的新闻冒充 {curr_date} 的新闻。
+        before_count = len(unique)
+        unique = [n for n in unique if not _date_is_after(n.get("time"), curr_date)]
+        if before_count > len(unique):
+            notice = (
+                f"（已剔除 {before_count - len(unique)} 条发布时间晚于 {curr_date} "
+                f"的资讯：CLS / 东财这两个源只滚动最新条目，不是历史归档。）\n"
+            )
+        if not unique:
+            return (
+                f"No global news available for {curr_date}: the upstream feeds only "
+                f"serve the current rolling window, so none of the items they return "
+                f"had been published by that date.\n{notice}"
+            )
+
     for n in unique[:limit]:
         news_str += f"### {n['title']} (source: {n['source']})\n"
         if n.get("content"):
@@ -1925,6 +2049,7 @@ def get_global_news(
 
     return (
         f"## China & Global Market News, from {start_date} to {curr_date}:\n\n"
+        + notice
         + news_str
     )
 
@@ -2186,46 +2311,49 @@ def _save_northbound_snapshot(
     ``sgt`` 允许为 None（上游已停止披露深股通盘中净买入），此时写入 ``nan``
     占位而非 0，避免把「缺数据」伪装成「净流入 0 亿」污染历史均值。
 
-    Atomic replacement via temp file + ``os.replace``: when running deep analyses
-    for multiple tickers in parallel, multiple TA subprocesses write to this shared
-    cache concurrently, so a non-atomic read-modify-write would race and could leave
-    a half-written file behind.
+    Concurrency: 多个 TA 子进程并行深析会同时写这份共享缓存，故读-改-写全程
+    持 ``_cache_lock``，落盘走 ``_atomic_write``（临时文件 + ``os.replace``）。
     """
     import csv
-    import tempfile
 
     path = _northbound_cache_path()
-    existing: dict[str, tuple[str, str]] = {}
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            next(reader, None)
-            for row in reader:
-                if len(row) >= 3:
-                    existing[row[0]] = (row[1], row[2])
-    sgt_txt = "nan" if sgt is None else f"{float(sgt):.2f}"
-    existing[date_str] = (f"{hgt:.2f}", sgt_txt)
-    sorted_dates = sorted(existing.keys())
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=".northbound_", suffix=".tmp", dir=os.path.dirname(path)
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["date", "hgt", "sgt"])
-            for d in sorted_dates:
-                writer.writerow([d, existing[d][0], existing[d][1]])
-        os.replace(tmp_path, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    # 读-改-写必须串行（见 _cache_lock）：原子替换只保证文件不被读到半截，
+    # 挡不住"两个进程各读到同一份旧表，后写的把先写的行覆盖掉"。
+    with _cache_lock(path):
+        existing: dict[str, tuple[str, str]] = {}
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                next(reader, None)
+                for row in reader:
+                    if len(row) >= 3:
+                        existing[row[0]] = (row[1], row[2])
+        sgt_txt = "nan" if sgt is None else f"{float(sgt):.2f}"
+        existing[date_str] = (f"{hgt:.2f}", sgt_txt)
+        sorted_dates = sorted(existing.keys())
+        _atomic_write(
+            path,
+            lambda f: _write_northbound_rows(f, sorted_dates, existing),
+        )
 
 
-def _load_northbound_history(n: int = 20) -> list[tuple[str, float, float]]:
-    """Load last N days of northbound close data from local cache."""
+def _write_northbound_rows(f, sorted_dates, existing) -> None:
+    import csv
+
+    writer = csv.writer(f)
+    writer.writerow(["date", "hgt", "sgt"])
+    for d in sorted_dates:
+        writer.writerow([d, existing[d][0], existing[d][1]])
+
+
+def _load_northbound_history(
+    n: int = 20, before: str = ""
+) -> list[tuple[str, float, float]]:
+    """Load last N days of northbound close data from local cache.
+
+    ``before`` 非空时只取该日期（含）之前的行——复盘历史日期时，缓存里
+    分析日之后才写入的收盘快照属于未来数据，不能进报告。
+    """
     import csv
 
     path = _northbound_cache_path()
@@ -2237,10 +2365,13 @@ def _load_northbound_history(n: int = 20) -> list[tuple[str, float, float]]:
         next(reader, None)
         for row in reader:
             if len(row) >= 3:
+                if before and str(row[0])[:10] > before[:10]:
+                    continue
                 try:
                     rows.append((row[0], float(row[1]), float(row[2])))
                 except ValueError:
                     continue
+    rows.sort(key=lambda r: r[0])
     return rows[-n:]
 
 
@@ -2277,14 +2408,25 @@ def get_northbound_flow(
     sgt_close: float | None = None
     got_realtime = False
 
-    try:
-        url_rt = "https://data.hexin.cn/market/hsgtApi/method/dayChart/"
-        r = requests.get(url_rt, headers=hsgt_headers, timeout=10)
-        d = r.json()
+    # 复盘历史日期时不能取"此刻"的分钟级净买入——那是今天的数据，被冠上
+    # {curr_date} 的标题后完全看不出是未来数据。
+    historical = _is_historical(curr_date)
+    if historical:
+        lines.append(
+            _snapshot_notice(curr_date, "北向资金实时分钟数据")
+            + "已略去实时分钟段；下方仅为本地缓存的收盘快照（已按分析日截断）。"
+        )
 
-        times = d.get("time", [])
-        hgt = d.get("hgt", [])
-        sgt = d.get("sgt", [])
+    try:
+        if historical:
+            times = []
+        else:
+            url_rt = "https://data.hexin.cn/market/hsgtApi/method/dayChart/"
+            r = requests.get(url_rt, headers=hsgt_headers, timeout=10)
+            d = r.json()
+            times = d.get("time", [])
+            hgt = d.get("hgt", [])
+            sgt = d.get("sgt", [])
 
         if times:
             lines.append("## Realtime (cumulative net buying, 亿元)")
@@ -2323,15 +2465,19 @@ def get_northbound_flow(
             elif total < 0:
                 lines.append("Signal: Net northbound OUTFLOW (bearish)")
             got_realtime = True
+        elif historical:
+            lines.append("(realtime minute series omitted for a historical date — see notice above)")
         else:
             lines.append("No realtime data (non-trading hours or holiday)")
 
         if got_realtime:
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            _save_northbound_snapshot(today_str, hgt_close, sgt_close)
+            # 快照日期用市场时区：否则 hosts 在 UTC+8 以西时会把昨天写进今天的键。
+            _save_northbound_snapshot(_market_today().isoformat(), hgt_close, sgt_close)
 
         if include_history:
-            history = _load_northbound_history(20)
+            history = _load_northbound_history(
+                20, before=str(curr_date)[:10] if historical else ""
+            )
             if history:
                 lines.append("\n## Historical Daily Close (local cache, 亿元)")
                 lines.append("Date       | HGT(沪股通) | SGT(深股通) | Total")
@@ -2437,12 +2583,30 @@ def _em_concept_blocks(code: str) -> str:
 
 def get_concept_blocks(
     ticker: Annotated[str, "A-stock code (e.g. 688017)"],
+    curr_date: Annotated[
+        str, "Analysis date YYYY-MM-DD; used to flag look-ahead when historical"
+    ] = "",
 ) -> str:
     """Get concept/sector/region blocks that a stock belongs to (百度股市通).
 
     Returns industry classification (申万), concept themes, and region.
-    Each block includes current day's change percentage.
+    Each block includes the change percentage of the retrieval moment — a live
+    snapshot with no historical point-in-time equivalent, so on a historical
+    analysis date the block-change figures are flagged rather than silently
+    presented as that day's numbers.
     """
+    body = _concept_blocks_live(ticker)
+    if _is_historical(curr_date):
+        return (
+            _snapshot_notice(curr_date, "个股所属板块及其当日涨跌幅")
+            + "（板块**名单**是相对稳定的事实，可继续用；涨跌幅不要当分析日当天的数。）\n"
+            + body
+        )
+    return body
+
+
+def _concept_blocks_live(ticker: str) -> str:
+    """板块取数本体（不含日期防护）。百度 PAE 主源，失败降级东财 slist。"""
     import requests
 
     code = _normalize_ticker(ticker)
@@ -2962,6 +3126,14 @@ def get_lockup_expiry(
             sort_columns="FREE_DATE",
             sort_types="-1",
         )
+        # 接口按 FREE_DATE 倒序返回最近 15 条，**不区分解禁日是否已过**：
+        # 复盘历史日期时最后几条是"分析日之后才发生"的解禁，放进「历史解禁
+        # 记录」等于把未来事件当成已知事实（减持压力被提前"看见"）。
+        history_data = [
+            row
+            for row in (history_data or [])
+            if not _date_is_after(row.get("FREE_DATE"), trade_date)
+        ]
         if history_data:
             lines.append(f"\n## 个股解禁记录 (共 {len(history_data)} 批)")
             lines.append("解禁时间 | 类型 | 解禁数量 | 占比")
@@ -3033,6 +3205,13 @@ def get_industry_comparison(
     """
     code = _normalize_ticker(ticker)
     lines = [f"# 行业横向对比 | {code} | {trade_date}"]
+    # 行业排名是"取数此刻"的涨跌幅快照，接口不提供历史某日的排名；复盘历史
+    # 日期时必须说清楚，否则模型会把今天的领涨行业当成当时的行业格局。
+    if _is_historical(trade_date):
+        lines.append(
+            _snapshot_notice(trade_date, "行业板块涨跌幅排名")
+            + "（行业**名单**可用；排名与涨跌幅只代表取数时刻。）"
+        )
 
     # 东财 push2 行业板块排名 (direct HTTP, replaces 同花顺 which has 401)
     try:

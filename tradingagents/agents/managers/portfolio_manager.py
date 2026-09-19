@@ -39,6 +39,8 @@ def create_portfolio_manager(llm):
         risk_debate_state = state["risk_debate_state"]
         research_plan = state["investment_plan"]
         trader_plan = state["trader_investment_plan"]
+        # 数据质量门控结论（此前只进牛熊研究员）：终裁必须知道哪些报告被判 D/F
+        quality = state.get("data_quality_summary", "")
 
         past_context = state.get("past_context", "")
         lessons_line = (
@@ -93,7 +95,15 @@ def create_portfolio_manager(llm):
   mainly on (i) execution constraints (T+1, price limits, stop-loss feasibility) or (ii) the price having
   already risen, you MUST rate **Buy** or **Overweight** — Overweight when 1-2 material risks remain
   unresolved, Buy when the evidence is decisive and valuation is not clearly stretched.
-- Missing or low-quality data is an uncertainty to disclose, never a bearish argument.
+- **Mandatory negative trigger** (symmetric to the above): if the bear case prevails on those dimensions
+  while the bull case rests mainly on (i) theme / narrative extrapolation without a verifiable earnings or
+  cash-flow path, or (ii) sentiment or momentum alone, you MUST rate **Underweight** or **Sell** —
+  Underweight when the deterioration is real but partly priced in, Sell when the evidence is decisive or
+  the downside path is unhedgeable.
+- Both triggers are symmetric: never let the absence of perfect evidence on one side alone decide the
+  rating, in either direction.
+- Missing or low-quality data is an uncertainty to disclose — it is **neither** a bearish **nor** a bullish
+  argument, and it must not move the rating in either direction.
 - Do NOT: follow the most pessimistic analyst; end with "wait for a right-side signal" without giving a
   conditional rating; treat "it has already run up" as a sufficient rejection; let unverifiable
   extrapolation push the rating up either.
@@ -102,6 +112,8 @@ def create_portfolio_manager(llm):
 **Context:**
 - Research Manager's investment plan: **{research_plan}**
 - Trader's transaction proposal: **{trader_plan}**
+- Data quality gate (reports graded D/F are weak evidence — do not build the rating on them):
+{quality if quality else "（本次无数据质量门控结论）"}
 {lessons_line}
 **Risk Analysts Debate History:**
 {history}

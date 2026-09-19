@@ -11,14 +11,17 @@ backtesting date fidelity（#475）。
 """
 
 from datetime import datetime, timedelta
+import os
+import time
 
 import pytest
 
 from tradingagents.dataflows import a_stock
 
 
-TODAY = datetime.now().strftime("%Y-%m-%d")
-PAST = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+# 用市场时区定"今天"：主机时区不同会把当天的分析判成复盘，测试结论随之翻转。
+TODAY = a_stock._market_today().isoformat()
+PAST = (a_stock._market_today() - timedelta(days=90)).strftime("%Y-%m-%d")
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +178,7 @@ def test_every_date_aware_tool_forwards_its_date():
     from tradingagents.agents.utils import signal_data_tools
 
     src = inspect.getsource(signal_data_tools)
-    for name in ("get_profit_forecast", "get_fund_flow"):
+    for name in ("get_profit_forecast", "get_fund_flow", "get_concept_blocks"):
         call = f'route_to_vendor("{name}", '
         idx = src.find(call)
         assert idx != -1, f"找不到 {name} 的路由调用"
@@ -276,3 +279,331 @@ def test_is_historical_uses_market_timezone_not_host(monkeypatch):
     # 市场当天不该被判成历史，哪怕主机日历已经翻页
     assert a_stock._is_historical("2026-08-09") is False
     assert a_stock._is_historical("2026-08-08") is True
+
+
+# ---------------------------------------------------------------------------
+# 补防护：北向 / 全球资讯 / 行业对比 / 概念板块 / 解禁（此前都收了日期却不用）
+# ---------------------------------------------------------------------------
+
+
+def test_date_is_after_compares_date_part_only():
+    assert a_stock._date_is_after("2099-01-01 09:31", PAST) is True
+    assert a_stock._date_is_after(PAST, PAST) is False
+    # 解析不了不能删——格式意外不该把真实数据清空
+    assert a_stock._date_is_after("", PAST) is False
+    assert a_stock._date_is_after("unknown", PAST) is False
+    assert a_stock._date_is_after(PAST, "") is False
+
+
+def _patch_northbound_cache(monkeypatch, tmp_path, rows):
+    cache = tmp_path / "northbound_daily.csv"
+    body = "date,hgt,sgt\n" + "".join(f"{d},{h},{s}\n" for d, h, s in rows)
+    cache.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(a_stock, "_northbound_cache_path", lambda: str(cache))
+    return cache
+
+
+def test_northbound_omits_realtime_on_historical_date(monkeypatch, tmp_path):
+    """北向实时分钟段是"此刻"的数据，复盘历史时不能取、也不能写进当日快照。"""
+    _patch_northbound_cache(monkeypatch, tmp_path, [])
+    saved = []
+    monkeypatch.setattr(
+        a_stock, "_save_northbound_snapshot", lambda *a, **k: saved.append(a)
+    )
+    monkeypatch.setattr(
+        a_stock._requests,
+        "get",
+        lambda *a, **k: pytest.fail("复盘历史日期时不该请求实时分钟接口"),
+    )
+
+    out = a_stock.get_northbound_flow(PAST)
+
+    assert "未来函数警告" in out
+    assert PAST in out
+    assert "realtime minute series omitted" in out
+    assert saved == []
+
+
+def test_northbound_keeps_realtime_for_today(monkeypatch, tmp_path):
+    """当天分析照常取实时数据——防护不能误伤正常用法。"""
+    _patch_northbound_cache(monkeypatch, tmp_path, [])
+    calls = []
+    monkeypatch.setattr(
+        a_stock._requests,
+        "get",
+        lambda url, **k: (
+            calls.append(url)
+            or FakeResp({"time": ["09:30"], "hgt": [1.5], "sgt": [2.5]})
+        ),
+    )
+    monkeypatch.setattr(a_stock, "_save_northbound_snapshot", lambda *a, **k: None)
+
+    out = a_stock.get_northbound_flow(a_stock._market_today().isoformat())
+
+    assert calls, "当天分析必须继续取实时分钟数据"
+    assert "未来函数警告" not in out
+    assert "Realtime" in out
+
+
+def test_northbound_history_excludes_rows_after_analysis_date(monkeypatch, tmp_path):
+    """缓存里分析日之后才写入的收盘快照属于未来数据，不能进报告。"""
+    _patch_northbound_cache(
+        monkeypatch,
+        tmp_path,
+        [("2026-05-01", "1.00", "2.00"), ("2099-01-01", "9.00", "9.00")],
+    )
+    monkeypatch.setattr(a_stock._requests, "get", lambda *a, **k: FakeResp({"time": []}))
+
+    out = a_stock.get_northbound_flow(PAST, include_history=True)
+
+    assert "2099-01-01" not in out, "历史段泄漏了分析日之后的北向收盘"
+    assert "2026-05-01" in out
+
+
+def test_northbound_snapshot_date_uses_market_timezone(monkeypatch, tmp_path):
+    """快照写进哪天必须按市场时区算，否则键会错位到主机日历那一天。"""
+    _patch_northbound_cache(monkeypatch, tmp_path, [])
+    saved = {}
+    monkeypatch.setattr(
+        a_stock,
+        "_save_northbound_snapshot",
+        lambda d, h, s: saved.update(date=d),
+    )
+    monkeypatch.setattr(
+        a_stock._requests, "get", lambda *a, **k: FakeResp({"time": ["09:30"], "hgt": [1.0], "sgt": []})
+    )
+
+    a_stock.get_northbound_flow(a_stock._market_today().isoformat())
+
+    assert saved["date"] == a_stock._market_today().isoformat()
+
+
+def _cls_news(title: str, iso_date: str) -> dict:
+    ts = int(datetime.strptime(iso_date, "%Y-%m-%d").timestamp())
+    return {"title": title, "content": "c", "ctime": ts}
+
+
+def test_global_news_drops_items_published_after_analysis_date(monkeypatch):
+    monkeypatch.setattr(
+        a_stock._requests,
+        "get",
+        lambda *a, **k: FakeResp(
+            {"data": {"roll_data": [_cls_news("当日旧闻", PAST), _cls_news("未来闻", "2099-01-01")]}}
+        ),
+    )
+    monkeypatch.setattr(a_stock, "_em_get", lambda *a, **k: FakeResp({}))
+
+    out = a_stock.get_global_news(PAST)
+
+    assert "当日旧闻" in out
+    assert "未来闻" not in out, "分析日之后发布的资讯泄漏了"
+    assert "已剔除" in out
+
+
+def test_global_news_explains_when_rolling_window_has_nothing(monkeypatch):
+    """实时源只滚动最新条目：全被剔除时要说明，不能拿今天的新闻冒充历史。"""
+    monkeypatch.setattr(
+        a_stock._requests,
+        "get",
+        lambda *a, **k: FakeResp({"data": {"roll_data": [_cls_news("未来闻", "2099-01-01")]}}),
+    )
+    monkeypatch.setattr(a_stock, "_em_get", lambda *a, **k: FakeResp({}))
+
+    out = a_stock.get_global_news(PAST)
+
+    assert "No global news available" in out
+    assert PAST in out
+
+
+def test_global_news_keeps_everything_for_today(monkeypatch):
+    monkeypatch.setattr(
+        a_stock._requests,
+        "get",
+        lambda *a, **k: FakeResp({"data": {"roll_data": [_cls_news("今日新闻", TODAY)]}}),
+    )
+    monkeypatch.setattr(a_stock, "_em_get", lambda *a, **k: FakeResp({}))
+
+    out = a_stock.get_global_news(TODAY)
+
+    assert "今日新闻" in out
+    assert "已剔除" not in out
+
+
+def test_industry_comparison_warns_on_historical_date(monkeypatch):
+    monkeypatch.setattr(a_stock, "_em_get", lambda *a, **k: FakeResp({}))
+
+    out = a_stock.get_industry_comparison("600519", PAST)
+
+    assert "未来函数警告" in out
+    assert PAST in out
+
+
+def test_industry_comparison_silent_for_today(monkeypatch):
+    monkeypatch.setattr(a_stock, "_em_get", lambda *a, **k: FakeResp({}))
+
+    out = a_stock.get_industry_comparison("600519", TODAY)
+
+    assert "未来函数警告" not in out
+
+
+def _patch_concept_blocks(monkeypatch):
+    monkeypatch.setattr(
+        a_stock._requests,
+        "get",
+        lambda *a, **k: FakeResp(
+            {
+                "ResultCode": "0",
+                "Result": {
+                    "600519": [
+                        {"name": "概念", "list": [{"name": "白酒", "ratio": "+1.2%"}]}
+                    ]
+                },
+            }
+        ),
+    )
+
+
+def test_concept_blocks_warns_on_historical_date(monkeypatch):
+    """板块名单是事实、涨跌幅是快照；复盘历史时至少要标出后者不可当当日值。"""
+    _patch_concept_blocks(monkeypatch)
+
+    out = a_stock.get_concept_blocks("600519", PAST)
+
+    assert "未来函数警告" in out
+    assert "白酒" in out, "名单本身仍应保留（该拿的事实不能一起丢）"
+
+
+def test_concept_blocks_silent_for_today_and_for_missing_date(monkeypatch):
+    _patch_concept_blocks(monkeypatch)
+
+    assert "未来函数警告" not in a_stock.get_concept_blocks("600519", TODAY)
+    assert "未来函数警告" not in a_stock.get_concept_blocks("600519")
+
+
+def test_lockup_history_excludes_unlocks_after_analysis_date(monkeypatch):
+    """接口按解禁日倒序返回，不区分是否已过——未来解禁不能混进"历史解禁记录"。"""
+    rows = [
+        {"FREE_DATE": "2099-01-01", "LIMITED_STOCK_TYPE": "定增",
+         "FREE_SHARES_NUM": 1, "FREE_RATIO": 1},
+        {"FREE_DATE": "2026-05-01", "LIMITED_STOCK_TYPE": "首发",
+         "FREE_SHARES_NUM": 2, "FREE_RATIO": 2},
+    ]
+
+    def fake_dc(report, filter_str="", **kw):
+        if "FREE_DATE>=" in filter_str:
+            return [r for r in rows if r["FREE_DATE"] >= PAST]
+        return rows
+
+    monkeypatch.setattr(a_stock, "_eastmoney_datacenter", fake_dc)
+
+    out = a_stock.get_lockup_expiry("600519", PAST)
+    history_section = out.split("## 未来")[0]
+
+    assert "共 1 批" in history_section, f"历史解禁未按分析日截断:\n{history_section}"
+    assert "2099-01-01" not in history_section
+    assert "2026-05-01" in history_section
+
+
+def test_financial_statement_tools_require_curr_date():
+    """给默认值等于没设防：模型不传 curr_date 时数据层不做任何时点截断。"""
+    from tradingagents.agents.utils import fundamental_data_tools as tools
+
+    for name in ("get_balance_sheet", "get_cashflow", "get_income_statement"):
+        required = getattr(tools, name).args_schema.model_json_schema().get("required", [])
+        assert "curr_date" in required, f"{name} 的 curr_date 仍是可选"
+
+
+def test_financial_statement_tools_forward_vendor_order():
+    """工具层把 curr_date 提到第二位只是为了必填，转发时必须还原数据层的位置顺序。"""
+    import inspect
+
+    from tradingagents.agents.utils import fundamental_data_tools as tools
+
+    src = inspect.getsource(tools)
+    for name in ("get_balance_sheet", "get_cashflow", "get_income_statement"):
+        assert f'route_to_vendor("{name}", ticker, freq, curr_date)' in src
+
+
+def test_statement_flags_missing_curr_date(monkeypatch):
+    """缺 curr_date 时截断失效是静默的，必须在报告头里说出来。"""
+    import pandas as pd
+
+    monkeypatch.setattr(
+        a_stock,
+        "_get_financial_report_sina",
+        lambda *a, **k: pd.DataFrame({"科目": ["货币资金"], "2026-06-30": [1.0]}),
+    )
+
+    assert "未提供分析日期" in a_stock.get_balance_sheet("600519")
+    assert "未提供分析日期" not in a_stock.get_balance_sheet("600519", curr_date=PAST)
+
+
+def test_atomic_write_replaces_and_cleans_up(tmp_path):
+    path = tmp_path / "x.csv"
+    path.write_text("old", encoding="utf-8")
+
+    a_stock._atomic_write(str(path), lambda f: f.write("new"))
+
+    assert path.read_text(encoding="utf-8") == "new"
+    assert list(tmp_path.glob(".x.csv.*")) == [], "临时文件没有清理干净"
+
+
+def test_atomic_write_keeps_original_when_write_fails(tmp_path):
+    path = tmp_path / "x.csv"
+    path.write_text("old", encoding="utf-8")
+
+    def boom(f):
+        f.write("partial")
+        raise RuntimeError("disk full")
+
+    with pytest.raises(RuntimeError):
+        a_stock._atomic_write(str(path), boom)
+
+    assert path.read_text(encoding="utf-8") == "old", "写失败不该破坏已有缓存"
+    assert list(tmp_path.glob(".x.csv.*")) == []
+
+
+def test_cache_lock_acquires_and_releases(tmp_path):
+    path = str(tmp_path / "c.csv")
+
+    with a_stock._cache_lock(path) as acquired:
+        assert acquired is True
+        assert os.path.exists(path + ".lock")
+
+    assert not os.path.exists(path + ".lock"), "锁文件没有释放"
+
+
+def test_cache_lock_takes_over_stale_lock(tmp_path):
+    """持锁进程被 kill 会留下锁文件，不能让后续所有取数都卡到超时。"""
+    path = str(tmp_path / "c.csv")
+    lock = path + ".lock"
+    with open(lock, "w", encoding="utf-8"):
+        pass
+    stale = time.time() - 3600
+    os.utime(lock, (stale, stale))
+
+    with a_stock._cache_lock(path, timeout=1.0) as acquired:
+        assert acquired is True
+
+
+def test_cache_lock_degrades_instead_of_blocking(tmp_path):
+    """抢不到锁要退化为无锁读写，不能因为缓存争用把取数流程打断。"""
+    path = str(tmp_path / "c.csv")
+    with open(path + ".lock", "w", encoding="utf-8"):
+        pass
+
+    started = time.monotonic()
+    with a_stock._cache_lock(path, timeout=0.3) as acquired:
+        assert acquired is False
+    assert time.monotonic() - started < 3
+
+
+def test_northbound_snapshot_merges_instead_of_overwriting(monkeypatch, tmp_path):
+    """读-改-写：已有日期必须保留，否则并发深析会一天天丢缓存。"""
+    cache = _patch_northbound_cache(monkeypatch, tmp_path, [("2026-05-01", "1.00", "2.00")])
+
+    a_stock._save_northbound_snapshot("2026-05-02", 3.0, 4.0)
+
+    body = cache.read_text(encoding="utf-8")
+    assert "2026-05-01" in body and "2026-05-02" in body
+    assert not os.path.exists(str(cache) + ".lock")

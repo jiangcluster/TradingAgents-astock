@@ -6,6 +6,114 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.25] — 2026-09-19
+
+承接 0.5.24 的评级校准，处理整体评估中提出的 4 组问题：**评级校准只有正向触发**、
+**质量门控与上下文三处接线断裂**、**数据层时点截断只覆盖 2 个工具**、**工程遗留**。
+
+### Changed：评级校准补对称负向触发（建议 1）
+
+0.5.24 加了"多头占优 → 必须给 Buy/Overweight"的**强制正向触发**，但没有对称的负向
+一侧：空头逻辑占优时 PM 仍可自由选择 Hold，校准等于单向放松。
+
+- `agents/managers/portfolio_manager.py`
+  - 新增 **Mandatory negative trigger**：空头在上述决策维度占优、而多头主要依赖
+    （i）无可验证盈利/现金流路径的主题外推，或（ii）情绪与动量本身时，**必须**给
+    **Underweight 或 Sell**（恶化真实但已被部分定价 → Underweight；证据决定性、下行
+    不可对冲 → Sell）；
+  - 明确两个触发**对称**：任何一侧都不因"另一侧证据不完美"而单独决定评级；
+  - "数据缺失"由 `never a bearish argument` 改为 **`neither a bearish nor a bullish
+    argument, and it must not move the rating in either direction`** —— 原措辞读起来
+    像"缺数据可以看多"，与"数据缺失只作不确定性披露"自相矛盾。
+
+### Fixed：三处接线断裂（建议 2）
+
+- `agents/quality_gate.py`：门控原按**全部 7 个分析师**判级，而 `selected_analysts`
+  可以只选 1-3 个——未选中者报告必为空、判 F，凭空凑够 `fail_count >= 4`，
+  反而把 LLM 复审整段跳过（选得越少，门控越容易被自己关掉）。现改为新增
+  `_active_analysts(state)`，**只对本次进图的分析师判级**，未选中者标注
+  `[—] 未运行（本次未选中，不计入质量评级）`；`_build_review_prompt` 的表格行随
+  审核范围动态生成；summary 增加 `**审核范围**` 一行。
+- `agents/quality_gate.py`：`fail_count >= 4` 时原文案**静默留空**——下游无法区分
+  "复审通过"与"复审没跑"。现输出显式说明（哪几份未通过、已跳过复审、下游需主动
+  降权使用、"不要把「缺数据」当作「没有风险」"）。
+- `agents/managers/research_manager.py` / `agents/managers/portfolio_manager.py`：
+  `data_quality_summary` 此前只进牛熊两位研究员，**研究主管与最终裁决者看不到**——
+  `investment_plan` 与终裁可能建立在被判 D/F 的报告之上而毫无提示。现两处 prompt
+  均注入该结论（无结论时写明"本次无数据质量门控结论"）。
+- `agents/trader/trader.py`：交易员此前只拿到研究计划 + 政策/游资/解禁三份报告，
+  **技术面与基本面原文、整段多空辩论从未进入"决定买/卖"这一步**，提示词却声称
+  基于"a team of analysts"的综合分析。现补 `Key Analyst Evidence (truncated)` 块
+  （技术面 1500 / 基本面 1500 / 辩论史 2000 / 门控 1200 字符，`_clip` 截断），并要求
+  "若关键证据与研究计划相矛盾，在 reasoning 中说明，而不是默默照做"。
+- `agents/risk_mgmt/{aggressive,conservative,neutral}_debator.py`：三方此前只看到
+  交易员压缩后的 3 档 action，看不到研究层的 5 档评级与论证强度，容易对"已打折的
+  信息"再表态。现三处均注入研究经理原始立场，并提示"行动是立场的压缩视图，请两者
+  互校，而不是只辩论摘要"。
+
+### Fixed：数据层时点截断与缓存并发（建议 3）
+
+复核发现 `test_lookahead_guard` 的覆盖只落在 `get_profit_forecast` 与 `get_fund_flow`
+两个工具上，其余**收了日期参数却完全不用**，复盘历史时会把今天的快照当当时的
+事实；财报三表则因 `curr_date` 带默认值而可以静默跳过截断。
+
+- `dataflows/a_stock.py`
+  - `get_northbound_flow`：复盘历史日期时**不再请求实时分钟接口**（那是今天的数据）、
+    不再把今日快照写入缓存，正文顶部给出未来函数告警；本地缓存历史按分析日截断
+    （`_load_northbound_history(before=...)`）；快照日期改用 `_market_today()`。
+  - `get_global_news`：按发布时间逐条剔除"分析日之后才发布"的资讯（CLS / 东财都是
+    只滚动最新条目的实时源，没有历史归档），并在剔除后为空时明确说明"上游只提供
+    当前滚动窗口"，而不是拿今天的新闻冒充历史。
+  - `get_industry_comparison`：行业排名是取数时刻的涨跌幅快照，复盘历史日期时给出
+    告警（行业名单仍可用，排名与涨跌幅只代表取数时刻）。
+  - `get_concept_blocks`：新增可选 `curr_date`（工具层与 `hot_money_tracker` 提示词
+    同步），历史日期时对"当日涨跌幅"给出告警；板块**名单**作为相对稳定的事实在
+    告警之后原样保留，避免误伤可用的信息。
+  - `get_lockup_expiry`：东财接口按解禁日倒序返回最近 15 条、**不区分是否已过**，
+    复盘历史时"未来解禁"会混进「历史解禁记录」（未来事件被提前"看见"）。现按
+    `FREE_DATE <= trade_date` 过滤历史段（`_date_is_after` 只比日期部分，解析不了的
+    值保留而非删除）。
+  - 新增 `_date_is_after(value, cutoff)`：供新闻与解禁复用；解析失败返回 False。
+  - OHLCV 缓存：`to_csv(path)` 直接落盘改为 `_atomic_write`（临时文件 + `os.replace`），
+    并发深析时不再有进程读到写了一半的 CSV；缓存"当天"判定由主机本地时区改为
+    **`_market_today()`（Asia/Shanghai）**——主机在 UTC+8 以西会把当天缓存当隔日重抓，
+    以东则会把昨天的缓存当今天复用（少一根日线）。
+  - 新增 `_cache_lock(path)`：`O_CREAT|O_EXCL` 锁文件 + 超时的**跨进程锁**。北向与
+    资金流缓存是"读-改-写"，只做原子替换仍会**丢更新**（两个进程各读到同一份旧表，
+    后写的覆盖先写的行）。持锁进程被 kill 留下的残留锁按 mtime 超龄接管；**抢不到锁
+    不报错**，退化为无锁读改写，缓存争用不该打断取数。
+  - 财报三表：未传 `curr_date` 时在报告头显式告警（"下表可能含未来财报数据，
+    不得用于复盘历史"）——截断失效原本是静默的，"未过滤"与"当时没披露"长得一样。
+- `agents/utils/fundamental_data_tools.py`：`get_balance_sheet` / `get_cashflow` /
+  `get_income_statement` 的 `curr_date` 由 `= None` 改为**必填**（提到第二位以规避
+  "默认参数后不能跟非默认参数"，转发时仍按数据层的 `(ticker, freq, curr_date)`
+  位置顺序还原）。
+- `agents/analysts/fundamentals_analyst.py`：提示词同步要求三张表必传 `curr_date`。
+
+### Fixed：工程清理（建议 5）
+
+- `graph/trading_graph.py`：`Propagator()` 原为**无参构造**，`max_recur_limit` 配置项
+  写了也不生效（始终用类默认值）。改为 `Propagator(max_recur_limit=...)`。
+- `graph/trading_graph.py` / `graph/propagation.py` / `agents/utils/agent_states.py`：
+  新增 `selected_analysts` 字段并沿 `create_initial_state` 传递，供质量门控判断
+  "本次实际进图的分析师"。
+- `dataflows/alpha_vantage_common.py`：`requests.get` 补 `timeout=30`——requests 默认
+  无限等待，一次卡住的连接会把整个分析流程挂死（图上没有并发看门狗，外层只能等）。
+
+### Tests
+
+- 新增 `tests/test_quality_gate.py`（18 例）：硬检查分级、`_active_analysts` 三态、
+  只判已运行分析师、3 份 F 仍复审（回归 0.5.25 的修复）、≥4 份 F 跳过复审并显式说明、
+  LLM 异常不抛出、复审提示词覆盖范围与行数一致。
+- `tests/test_lookahead_guard.py` 扩至 45 例：北向实时/历史/快照日期、全球资讯逐条
+  剔除、行业与概念板块告警、解禁历史截断、财报 `curr_date` 必填与缺失告警、
+  `_atomic_write` 成功/失败、`_cache_lock` 获取/释放/接管残留锁/超时降级、
+  北向快照读-改-写不丢已有行；`TODAY`/`PAST` 改用市场时区。
+- `tests/test_astock_p0p1_fixes.py`：北向实时分支用例改用**市场当天**（写死的
+  2026-09-06 一旦成为过去，新防护会略去实时段，用例就测不到原逻辑了）。
+
+全量：512 passed / 13 skipped。
+
 ## [0.5.24] — 2026-09-18
 
 ### Changed：风险辩论／PM 终裁的评级校准（修复"结构性约束吞掉买入评级"）

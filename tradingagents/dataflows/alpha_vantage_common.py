@@ -63,7 +63,9 @@ def _make_api_request(function_name: str, params: dict) -> dict | str:
         # Remove entitlement if it's None or empty
         api_params.pop("entitlement", None)
     
-    response = requests.get(API_BASE_URL, params=api_params)
+    # 必须带超时：requests 默认无限等待，一次卡住的连接会把整个分析流程挂死
+    # （图上没有并发看门狗，外层只能等）。
+    response = requests.get(API_BASE_URL, params=api_params, timeout=30)
     response.raise_for_status()
 
     response_text = response.text
