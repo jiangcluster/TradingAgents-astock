@@ -53,7 +53,10 @@ def create_portfolio_manager(llm):
 
 ---
 
-**A-Stock Trading Constraints** (must factor into your decision):
+**A-Stock Trading Constraints — execution & position-sizing rules** (these are NOT evidence against a position):
+- These constraints are identical for every A-share name. They tell you HOW a decision must be executed
+  (size, entry timing, whether a stop is practically executable) — they are NOT case-specific evidence for
+  or against this stock. Never downgrade a rating merely because these constraints exist.
 - T+1 settlement: shares bought today cannot be sold until the next trading day
 - Daily price limits: main board ±10%, STAR/ChiNext ±20%, Beijing Stock Exchange ±30%.
   Risk-warning stocks (ST/*ST) do NOT get a narrower band: since 2026-07-06 main-board
@@ -79,6 +82,22 @@ def create_portfolio_manager(llm):
 - **Hold**: Maintain current position, no action needed
 - **Underweight**: Reduce exposure, take partial profits
 - **Sell**: Exit position or avoid entry
+
+**Rating Calibration** (rate the *balance of evidence*, not the amount of known risk):
+- Weigh the decision-relevant dimensions: direction of earnings and cash flow, valuation versus the actual
+  growth path, fund-flow / chip structure, verifiable catalysts with a dated path, and policy direction.
+- **Hold is a verdict, not a default.** Use Hold only when the bull and bear cases are genuinely balanced
+  after weighing evidence quality. "A good company but not a perfect entry" or "risks exist" are NOT
+  sufficient grounds for Hold or Underweight.
+- **Mandatory positive trigger**: if the bull case prevails on those dimensions while the bear case rests
+  mainly on (i) execution constraints (T+1, price limits, stop-loss feasibility) or (ii) the price having
+  already risen, you MUST rate **Buy** or **Overweight** — Overweight when 1-2 material risks remain
+  unresolved, Buy when the evidence is decisive and valuation is not clearly stretched.
+- Missing or low-quality data is an uncertainty to disclose, never a bearish argument.
+- Do NOT: follow the most pessimistic analyst; end with "wait for a right-side signal" without giving a
+  conditional rating; treat "it has already run up" as a sufficient rejection; let unverifiable
+  extrapolation push the rating up either.
+- State explicitly which single piece of evidence would flip your rating.
 
 **Context:**
 - Research Manager's investment plan: **{research_plan}**

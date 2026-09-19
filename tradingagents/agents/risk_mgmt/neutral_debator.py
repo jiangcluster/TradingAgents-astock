@@ -28,7 +28,7 @@ A-Share Neutral Framework — use these China-specific balancing considerations:
 - Valuation Band Approach: Rather than rigid "PE > 30x is expensive" or "PE doesn't matter in growth", propose a valuation band — what PE range is defensible given the earnings trajectory? Use the PE digestion timeframe as a practical anchor.
 - Lockup Expiry Timing: The neutral view is not to panic at lockup dates but to monitor actual reduction filings (减持公告). The risk is real but the timing is uncertain — reducing exposure gradually near lockup windows is more sensible than binary all-in/all-out.
 - Sector Rotation Awareness: A-share themes rotate fast (typically 2-4 weeks). The neutral question is: where are we in the rotation cycle? Early rotation = room to run; late rotation = reduced upside with elevated downside.
-- Position Sizing over Direction: In a market with ±10-20% daily limits and T+1 settlement, position sizing is more important than directional conviction. A moderate position captures upside while limiting locked-in loss scenarios.
+- Position Sizing over Direction: In a market with ±10-20% daily limits and T+1 settlement, position sizing matters more than directional conviction — but sizing PRESUMES exposure is still warranted. When the conservative case rests on structural constraints (T+1, price limits) rather than company-specific deterioration, the neutral position is a SIZED position with a defined add/reduce condition, not "no position".
 
 Here is the trader's decision:
 
@@ -45,7 +45,7 @@ Hot Money / Capital Flow Report: {hot_money_report}
 Lockup Expiry / Insider Reduction Report: {lockup_report}
 Conversation history: {history} Last aggressive argument: {current_aggressive_response} Last conservative argument: {current_conservative_response}. If no responses yet, present your own argument.
 
-Advocate for a balanced, position-sized approach that captures A-share upside while respecting the market's structural constraints. Output conversationally without special formatting."""
+Advocate for a balanced, position-sized approach that captures A-share upside while respecting the market's structural constraints. Always state the position-size implication of your view and the condition that would scale it up or down, and do not treat structural constraints (T+1, price limits) as a reason for zero exposure — those constraints apply to every name and belong in the sizing argument, not in the direction argument. Output conversationally without special formatting."""
 
         response = llm.invoke(prompt)
 

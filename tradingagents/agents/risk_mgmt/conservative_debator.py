@@ -22,7 +22,7 @@ def create_conservative_debator(llm):
         prompt = f"""As the Conservative Risk Analyst evaluating an A-share (China mainland) stock, your primary objective is to protect assets, minimize volatility, and ensure steady, reliable growth. Critically examine high-risk elements in the trader's plan, pointing out where it may expose the firm to undue risk.
 
 A-Share Conservative Framework — emphasize these China-specific downside risks:
-- T+1 Settlement Lock: Any position taken today CANNOT be exited until tomorrow. If the stock gaps down at open (e.g. after overnight policy news or global sell-off), losses are locked in with no recourse. This is the single most important structural risk in A-shares.
+- T+1 Settlement Lock: Any position taken today CANNOT be exited until tomorrow. If the stock gaps down at open (e.g. after overnight policy news or global sell-off), losses are locked in with no recourse. It constrains HOW a position is sized and entered — it does not by itself decide WHETHER the opportunity is worth taking.
 - Daily Price Limit Trap (涨跌停板): If a stock hits limit-down (main board -10%, STAR/ChiNext -20%, Beijing Stock Exchange -30%), the order book on the buy side is typically empty, so sell orders queue but rarely fill. Since 2026-07-06 the after-hours fixed-price session (15:05-15:30, at the closing price) covers all A-shares, so exiting is not strictly impossible — but it still depends on finding a counterparty, which is exactly what is missing on a limit-down day. Treat it as "effectively trapped", not "literally unable to place an order". Multiple consecutive limit-downs can cause catastrophic losses with no practical ability to exit.
 - Lockup Expiry Overhang: Large lockup expiries (限售解禁) create massive potential sell pressure. Even if insiders haven't started selling, the OPTION to sell depresses sentiment and caps upside.
 - Policy Reversal Risk: A-shares are a policy market (政策市). What the government gives, it can take away overnight — sector support can turn to sector crackdown with a single State Council directive.
@@ -45,7 +45,17 @@ Hot Money / Capital Flow Report: {hot_money_report}
 Lockup Expiry / Insider Reduction Report: {lockup_report}
 Conversation history: {history} Last aggressive argument: {current_aggressive_response} Last neutral argument: {current_neutral_response}. If no responses yet, present your own argument.
 
-Demonstrate why a conservative stance is the safest path, especially given A-share market structure where downside protection mechanisms (stop-loss, same-day exit) are severely limited. Output conversationally without special formatting."""
+Separate two kinds of argument, and say explicitly which one you are making:
+(1) Execution constraints (T+1, price limits, lot/board rules): these apply to every A-share name, so they can
+only justify a SMALLER size, a staged entry or a longer holding tolerance — they are NOT a reason to reject
+this stock. If this is your main case, recommend the sizing/execution change instead of rejection.
+(2) Company-specific bearish evidence (earnings or cash-flow deterioration, distribution (派发) structure, a
+valuation the actual growth path cannot digest, policy / legal / lockup events, insider selling): quantify each
+one with the data you have and state what would resolve or falsify it. Only when (2) genuinely prevails should
+you argue against taking exposure at all.
+Judging evidence quality on both sides is part of your job: "the bull case relies on unverifiable
+extrapolation" is a strong argument; "A-shares are structurally risky" is not, because it is true of every
+name. Output conversationally without special formatting."""
 
         response = llm.invoke(prompt)
 
