@@ -598,6 +598,48 @@ _EM_MIRROR = {
     "push2his.eastmoney.com": "push2delay.eastmoney.com",
 }
 
+# 东财**行情集群**（push2 / push2his / push2delay）连接层熔断（0.5.27）。
+# 为什么需要：封禁是**集群级**的——实测（2026-09-21，A 股服务器）push2 与 push2his 及其
+# 镜像 push2delay 同时 `RemoteDisconnected`，而同域族的 datacenter-web / push2ex **正常**。
+# 没有熔断时，每一次东财工具调用都要付 1s 节流 + **2 次必失败的请求**（主站 + 镜像）；
+# 一轮 6 票深析下来 = 白等数分钟，且对上游多发数百次无效请求（正是"被限流"的放大器）。
+# 与 mootdx 的 300s 负缓存（`_MOOTDX_RETRY_AFTER_S`）同一思路，两处**不同**：
+#   ① 冷却**更短**（默认 60s）：封禁本身是**间歇**的（实测同晚 19:45 全封 → 20:11 起部分恢复），
+#      冷却过长会把恢复窗口一起跳掉；
+#   ② **只覆盖集群主机**（`_EM_CLUSTER_HOSTS`）：datacenter-web / search-api / push2ex 不在其中，
+#      它们可用且是龙虎榜/北向/解禁的唯一来源，绝不能被"东财"一词一锅端。
+# 且**只对连接层失败**计数（HTTP 4xx/5xx 不计）；半开——冷却到期后放行一次真实探测，
+# 成功即清零，再失败则重新计时（不用"永久拉黑"，那是把"间歇故障"当"永久故障"）。
+_EM_CLUSTER_HOSTS = frozenset(_EM_MIRROR) | {"push2delay.eastmoney.com"}
+_EM_BREAKER_FAILS = int(os.environ.get("EM_BREAKER_FAILS", "3"))
+_EM_BREAKER_COOLDOWN_S = float(os.environ.get("EM_BREAKER_COOLDOWN_SEC", "60"))
+_em_fail_streak = 0
+_em_breaker_until = 0.0
+
+
+def _em_cluster_note_failure() -> None:
+    """行情集群「整组候选都连接失败」一次；达阈值即开启熔断（负缓存）。"""
+    global _em_fail_streak, _em_breaker_until
+    if _EM_BREAKER_FAILS <= 0:          # 0/负数 = 关闭该机制（便于排查时临时禁用）
+        return
+    _em_fail_streak += 1
+    if _em_fail_streak >= _EM_BREAKER_FAILS:
+        _em_breaker_until = time.time() + _EM_BREAKER_COOLDOWN_S
+        logger.warning(
+            "东财行情集群连续 %d 次连接失败（push2/push2his/push2delay）→ 熔断 %.0fs："
+            "期间直接走腾讯/新浪备源、不再对其发无效请求",
+            _em_fail_streak, _EM_BREAKER_COOLDOWN_S,
+        )
+        _em_fail_streak = 0
+
+
+def _em_cluster_note_success() -> None:
+    """行情集群取数成功 → 清零失败计数并解除熔断（半开探测成功后的收敛）。"""
+    global _em_fail_streak, _em_breaker_until
+    if _em_fail_streak or _em_breaker_until:
+        _em_fail_streak = 0
+        _em_breaker_until = 0.0
+
 
 def _em_get(url, params=None, headers=None, timeout=15, **kwargs):
     """东财统一请求入口：自动节流 + 复用 session + 默认 UA + 主站断连镜像降级。
@@ -606,13 +648,31 @@ def _em_get(url, params=None, headers=None, timeout=15, **kwargs):
     串行限流：与上次东财请求间隔 < EM_MIN_INTERVAL 时 sleep 补足 + 0.1~0.5s 随机抖动。
     传入的 headers 会覆盖 session 默认 UA（用于保留各端点自己的 Referer/Origin）。
     push2 / push2his 主站连接失败或返回 4xx/5xx 时，自动用 push2delay 镜像重试一次。
+    行情集群（push2/push2his/push2delay）连续 `_EM_BREAKER_FAILS` 次**整组连接失败**后
+    进入 `_EM_BREAKER_COOLDOWN_S` 秒熔断：期间的请求**不再发往东财**、直接抛
+    `ConnectionError` 让调用方走腾讯/新浪备源（见 `_EM_CLUSTER_HOSTS` 的说明）。
     """
+    host = (urlsplit(url).hostname or "").lower()
+    mirror_host = _EM_MIRROR.get(host)
+    in_cluster = host in _EM_CLUSTER_HOSTS
+
+    # 熔断检查放在节流**之前**：命中时既不发请求，也不白等 1s 间隔。
+    if in_cluster:
+        remaining = _em_breaker_until - time.time()
+        if remaining > 0:
+            logger.warning(
+                "东财行情集群熔断中（剩余 %.0fs）→ 跳过 %s，直接走腾讯/新浪备源",
+                remaining, host,
+            )
+            raise _requests.exceptions.ConnectionError(
+                f"东财行情集群熔断中（剩余 {remaining:.0f}s）；这是连接层故障的负缓存，"
+                f"不是本次请求本身的问题"
+            )
+
     wait = _EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
     if wait > 0:
         time.sleep(wait + random.uniform(0.1, 0.5))
 
-    host = (urlsplit(url).hostname or "").lower()
-    mirror_host = _EM_MIRROR.get(host)
     candidates = [url]
     if mirror_host:
         candidates.append(url.replace(host, mirror_host, 1))
@@ -635,9 +695,13 @@ def _em_get(url, params=None, headers=None, timeout=15, **kwargs):
                         host, type(e).__name__, mirror_host,
                     )
                     continue
+                if in_cluster:
+                    _em_cluster_note_failure()
                 raise
             last_resp = resp
             if resp.status_code < 400:
+                if in_cluster:
+                    _em_cluster_note_success()
                 return resp
             if has_next:
                 logger.warning(

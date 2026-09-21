@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.27] — 2026-09-21
+
+### Fixed（东财行情集群连接层熔断：封禁期不再对东财发无效请求）
+
+**背景（2026-09-21 实测，A 股服务器）**：东财**行情集群**被封时 `push2` / `push2his` 与其镜像
+`push2delay` 是**同时**失败的（`RemoteDisconnected` / `Connection aborted`），而同域族的
+`datacenter-web`（龙虎榜·北向·解禁）、`push2ex`（涨停池）**正常**。此前 `_em_get` 有节流与
+镜像降级、却**没有熔断**：每一次行情类工具调用都要付 1s 节流 + **2 次必失败的请求**
+（主站 + 镜像）——一轮 6 票深析累计=白等数分钟，且对上游多发**数百次**无效请求
+（正是"IP 被限流/封禁"的放大器）。mootdx 早有 300s 负缓存，行情 HTTP 侧没有，属同类不对称。
+
+### Added
+
+- **`_em_get` 连接层熔断（`_EM_CLUSTER_HOSTS` / `_EM_BREAKER_FAILS=3` / `_EM_BREAKER_COOLDOWN_S=60`，
+  均可由环境变量覆盖，阈值设 0 即关闭）**：行情集群**连续 3 次整组连接失败**后进入 60s 熔断，
+  期间对该集群的请求**不再发出**（直接抛 `ConnectionError`，让调用方立刻走腾讯/新浪备源）。
+  三条刻意的边界，避免把"局部故障"放大成"全局故障"：
+  1. **只覆盖集群主机**（`push2` / `push2his` / `push2delay`）：`datacenter-web` / `search-api-web` /
+     `push2ex` **不受影响**——它们是龙虎榜/北向/解禁/涨停池的唯一来源，绝不能被一锅端；
+  2. **只对连接层失败计数**（HTTP 4xx/5xx 不算）：把"服务端有响应但拒绝"（限流/参数错）与"连不上"分开；
+  3. **冷却更短 + 半开**（60s，而非 mootdx 的 300s）：封禁是**间歇**的（实测同晚 19:45 全封 →
+     20:11 起即可出报告），冷却过长会把恢复窗口一起跳过；到期后放行一次真实探测，成功即清零。
+     这里**刻意不学** mootdx 那段被移除的"连续失败提前退出"——但那段的理由（池里靠后的服务器
+     可能是好的）在行情集群**不成立**：候选只有主站 + 镜像两个，且实测同生共死。
+
+### Tests
+
+- `tests/test_astock_datasrc_fixes.py` +5：达阈值后**零请求**快速失败、集群外主机不受影响、
+  HTTP 4xx 不触发熔断、一次成功即清零、冷却过后**真的重试**（防"永久拉黑"）。
+- `tests/conftest.py` 新增 autouse fixture 重置熔断状态（模块级状态会跨用例泄漏，
+  否则后续用例的 `hosts_called` 断言会莫名变空）。
+- 572 passed / 13 skipped（+5）。
+
 ## [0.5.26] — 2026-09-19
 
 承接 0.5.25 的整体评估，处理"静默失败"这一类问题：**评级解析失败会被写成 Hold**、

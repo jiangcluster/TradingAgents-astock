@@ -51,6 +51,22 @@ def _isolated_local_caches(monkeypatch, tmp_path):
     )
 
 
+@pytest.fixture(autouse=True)
+def _reset_em_breaker():
+    """重置东财行情集群熔断状态（0.5.27）。
+
+    `_em_fail_streak` / `_em_breaker_until` 是模块级状态：某个用例制造了 3 次连接失败后，
+    熔断会**跨用例**生效，让后续用例的 `_em_get` 直接快速失败（断言 hosts_called 就会莫名其妙地空）。
+    """
+    from tradingagents.dataflows import a_stock
+
+    a_stock._em_fail_streak = 0
+    a_stock._em_breaker_until = 0.0
+    yield
+    a_stock._em_fail_streak = 0
+    a_stock._em_breaker_until = 0.0
+
+
 @pytest.fixture()
 def mock_llm_client():
     client = MagicMock()

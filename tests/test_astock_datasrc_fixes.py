@@ -490,6 +490,93 @@ def test_em_get_updates_throttle_timestamp(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# _em_get: 行情集群熔断（0.5.27）——封禁期不再对东财发无效请求
+#
+# 背景（2026-09-21 实测，A 股服务器）：push2 / push2his / push2delay **同时**
+# RemoteDisconnected（集群级封禁），而同域族的 datacenter-web / push2ex 正常。
+# 无熔断时每次东财工具调用都要付 1s 节流 + 2 次必失败请求（一轮 6 票 = 数百次无效请求）。
+# ---------------------------------------------------------------------------
+
+def _patch_down_cluster(monkeypatch):
+    """push2 与其镜像（同一集群）都连接失败。"""
+    return _patch_session(monkeypatch, {
+        "push2.eastmoney.com": requests.exceptions.ConnectionError("Remote end closed"),
+        "push2delay.eastmoney.com": requests.exceptions.ConnectionError("Remote end closed"),
+    })
+
+
+def test_em_breaker_opens_after_threshold_and_skips_requests(monkeypatch):
+    """连续 N 次整组失败 → 之后**不再发任何请求**（快速失败，交调用方走腾讯/新浪）。"""
+    session = _patch_down_cluster(monkeypatch)
+    for _ in range(a_stock._EM_BREAKER_FAILS):
+        with pytest.raises(requests.exceptions.ConnectionError):
+            a_stock._em_get("https://push2.eastmoney.com/api/qt/clist/get")
+    calls_before = len(session.hosts_called)
+
+    with pytest.raises(requests.exceptions.ConnectionError) as ei:
+        a_stock._em_get("https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get")
+
+    assert len(session.hosts_called) == calls_before      # 熔断命中 → 零请求
+    assert "熔断中" in str(ei.value)
+
+
+def test_em_breaker_does_not_skip_other_eastmoney_hosts(monkeypatch):
+    """集群外主机（datacenter-web / push2ex）不受熔断影响——它们是龙虎榜/北向/解禁的唯一来源。"""
+    session = _patch_down_cluster(monkeypatch)
+    for _ in range(a_stock._EM_BREAKER_FAILS):
+        with pytest.raises(requests.exceptions.ConnectionError):
+            a_stock._em_get("https://push2.eastmoney.com/api/qt/clist/get")
+
+    resp = a_stock._em_get("https://datacenter-web.eastmoney.com/api/data/v1/get")
+
+    assert resp.status_code == 200
+    assert session.hosts_called[-1] == "datacenter-web.eastmoney.com"
+
+
+def test_em_breaker_not_opened_by_http_errors(monkeypatch):
+    """HTTP 4xx/5xx 说明"服务端有响应"，不计入连接层熔断（别把限流/参数错误当断网）。"""
+    _patch_session(monkeypatch, {
+        "push2.eastmoney.com": lambda url: FakeResp({}, status_code=403),
+        "push2delay.eastmoney.com": lambda url: FakeResp({}, status_code=404),
+    })
+    for _ in range(a_stock._EM_BREAKER_FAILS + 2):
+        a_stock._em_get("https://push2.eastmoney.com/api/qt/clist/get")
+
+    assert a_stock._em_breaker_until == 0.0
+
+
+def test_em_breaker_resets_on_success(monkeypatch):
+    """未达阈值的失败在**一次成功**后清零（计数不跨"恢复窗口"累积）。"""
+    session = _patch_down_cluster(monkeypatch)
+    for _ in range(a_stock._EM_BREAKER_FAILS - 1):
+        with pytest.raises(requests.exceptions.ConnectionError):
+            a_stock._em_get("https://push2.eastmoney.com/api/qt/clist/get")
+    assert a_stock._em_fail_streak > 0
+
+    session.behaviour = {}
+    a_stock._em_get("https://push2.eastmoney.com/api/qt/clist/get")
+
+    assert a_stock._em_fail_streak == 0 and a_stock._em_breaker_until == 0.0
+
+
+def test_em_breaker_probes_again_after_cooldown(monkeypatch):
+    """冷却过后必须**真的重试**东财（封禁是间歇的，不能永久拉黑、错过恢复窗口）。"""
+    session = _patch_down_cluster(monkeypatch)
+    for _ in range(a_stock._EM_BREAKER_FAILS):
+        with pytest.raises(requests.exceptions.ConnectionError):
+            a_stock._em_get("https://push2.eastmoney.com/api/qt/clist/get")
+
+    calls_before = len(session.hosts_called)              # 冷却中 → 不发请求
+    with pytest.raises(requests.exceptions.ConnectionError):
+        a_stock._em_get("https://push2.eastmoney.com/api/qt/clist/get")
+    assert len(session.hosts_called) == calls_before
+
+    session.behaviour = {}                                # 集群恢复
+    a_stock._em_breaker_until = 0.0                       # 等价于"冷却已到期"
+    assert a_stock._em_get("https://push2.eastmoney.com/api/qt/clist/get").status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # get_concept_blocks: 百度 403 → 东财 slist 降级
 # ---------------------------------------------------------------------------
 
