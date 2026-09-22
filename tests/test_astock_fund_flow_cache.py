@@ -22,6 +22,30 @@ def _patch_cache(monkeypatch, tmp_path):
     return path
 
 
+def test_save_flow_snapshot_holds_cache_lock(monkeypatch, tmp_path):
+    """G13：写缓存必须**持跨进程锁**（读-改-写；原子替换挡不住丢更新）。
+
+    深研按 `max_workers` 并行多个 TA 子进程、共享同一 `data_cache_dir`：
+    不加锁时两个进程会各读到同一份旧表，后写的把先写的行覆盖掉。
+    """
+    import contextlib
+
+    from tradingagents.dataflows import a_stock
+
+    path = _patch_cache(monkeypatch, tmp_path)
+    locked = []
+
+    @contextlib.contextmanager
+    def fake_lock(lock_path, timeout=None, **kw):
+        locked.append(str(lock_path))
+        yield
+
+    monkeypatch.setattr(a_stock, "_cache_lock", fake_lock)
+    a_stock._save_fund_flow_snapshot("2026-09-21", "600519", {"main": 1.0})
+
+    assert locked == [str(path)]          # 锁的是**同一个**缓存文件路径
+
+
 def test_save_flow_snapshot_sorted_dedup_and_nan(monkeypatch, tmp_path):
     from tradingagents.dataflows import a_stock
 

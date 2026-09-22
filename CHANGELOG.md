@@ -6,6 +6,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.28] — 2026-09-22
+
+### Fixed（第二轮全面审查 批 J/G/I：契约守卫补全、并发丢更新、词表漏项、环境变量防御）
+
+主题：**本会话新增代码自带的新契约面**（熔断、版本载体、资金流历史快照）逐项补守卫与防御；
+另订正 0.5.27 一处与实现不符的措辞。
+
+- **G13 资金流历史快照的读-改-写加缓存锁**：`_save_fund_flow_snapshot` 此前只做原子替换、**无锁**，
+  docstring 却称"可并发安全"；对照 `_save_northbound_snapshot` 是持 `_cache_lock` 的。多票并行
+  深析时并发的"读全文 → 追加当日 → 写回"会互相覆盖 → 20 日历史**缺日**，而该历史在行情集群
+  被封的网络下是本仓**唯一**的资金流来源，表现为"数据不全"而非报错。现整段读-改-写包进
+  `with _cache_lock(path)`。
+- **G14 `FAILURE_MARKERS` 补数据层实际失败文案**：词表只含 `"Error fetching"`，而数据层多数
+  失败返回的是 `Error retrieving …`（`a_stock.py` 六处）与 `No … data`（基本面/资金/概念等）。
+  质控门控认不出这些串 → 会把"取数失败"当合格数据给 A/B 级（正是注释自述要防的坑）。
+  现补齐 `Error retrieving` / `Error calculating` / `No fundamentals|balance sheet|cash flow|
+  income statement|insider|shareholder|concept|block data`，并加**词表 ↔ 数据层文案**一致性守卫
+  （从源码 `return f"Error (…)"` / `return f"No (…) data"` 反向提取后断言覆盖），
+  避免下次改文案又漏同步。
+- **G21 熔断阈值的环境变量解析加防御**：`_EM_BREAKER_FAILS` / `_EM_BREAKER_COOLDOWN_S` 此前在
+  **模块导入期**直接 `int()/float(os.environ[…])` → `EM_BREAKER_FAILS=abc` 会让
+  `import a_stock` 抛 `ValueError`，**一个可选调参写错即整个数据层不可导入**，且报错位置与
+  熔断毫无关系、误导排查。现抽 `_env_number()`：非法值 → `logger.warning` + 回落默认。
+- **G10 订正熔断注释与 0.5.27 CHANGELOG 的"半开"措辞**：原文称"冷却到期后**放行一次**真实探测，
+  再失败则重新计时"，实现是"冷却到期即恢复正常放行，需**再次连续打满阈值**才重开"
+  （`_em_cluster_note_failure` 开熔断时把 streak 归零）。机制本身是有意为之（候选只有主站 +
+  镜像两个、且实测同生共死，单次探测既救不回也挡不住），故**改文档不改实现**。
+
+### Added
+
+- **G15 版本载体守卫扩到第五处**：`cli/headless.py` docstring 的示例 JSON 也写了一份
+  `ta_version`，0.5.27 发版时它停在 `0.5.26` 而无人察觉（`test_version_consistency.py` 只锁四处）。
+  现该 docstring 纳入同一正则守卫，示例值同步；`CLAUDE.md` 的"四处要一起改"改为"五处"。
+
+### Docs
+
+- **G16 `CLAUDE.md` 测试基线 361 → 当前值**（361 是早期数字，0.5.27 已是 572）：后人按 361
+  判断回归会误判。同时明确**判据是 `0 failed`**，数字随版本增长、最新值以 CHANGELOG 顶部为准。
+
+### Tests
+
+- `tests/test_astock_datasrc_fixes.py` +1：`_env_number` 非法值回落默认（并断言发出 warning）。
+- `tests/test_astock_fund_flow_cache.py` +1：`_save_fund_flow_snapshot` 全程持缓存锁。
+- `tests/test_quality_gate.py` +1：词表覆盖数据层实际失败文案（**反向提取**，改文案即失败）。
+- `tests/test_version_consistency.py` +1：`cli/headless.py` 示例 `ta_version` == `pyproject`。
+- 572 → **576 passed / 13 skipped / 48 subtests passed**（+4）。
+
 ## [0.5.27] — 2026-09-21
 
 ### Fixed（东财行情集群连接层熔断：封禁期不再对东财发无效请求）
@@ -26,8 +73,11 @@ Breaking changes within the 0.x line are called out explicitly.
   1. **只覆盖集群主机**（`push2` / `push2his` / `push2delay`）：`datacenter-web` / `search-api-web` /
      `push2ex` **不受影响**——它们是龙虎榜/北向/解禁/涨停池的唯一来源，绝不能被一锅端；
   2. **只对连接层失败计数**（HTTP 4xx/5xx 不算）：把"服务端有响应但拒绝"（限流/参数错）与"连不上"分开；
-  3. **冷却更短 + 半开**（60s，而非 mootdx 的 300s）：封禁是**间歇**的（实测同晚 19:45 全封 →
-     20:11 起即可出报告），冷却过长会把恢复窗口一起跳过；到期后放行一次真实探测，成功即清零。
+  3. **冷却更短 + 不做半开门控**（60s，而非 mootdx 的 300s）：封禁是**间歇**的（实测同晚
+     19:45 全封 → 20:11 起即可出报告），冷却过长会把恢复窗口一起跳过；到期后**恢复放行**，
+     需**再次连续打满 `_EM_BREAKER_FAILS` 次**才重新熔断、任一成功即清零。
+     （**0.5.28 订正**：此处原写"放行一次真实探测、成功即清零"，与实现不符——候选只有主站 +
+     镜像两个、且实测同生共死，单次探测既救不回也挡不住，故**有意不做**半开门控。）
      这里**刻意不学** mootdx 那段被移除的"连续失败提前退出"——但那段的理由（池里靠后的服务器
      可能是好的）在行情集群**不成立**：候选只有主站 + 镜像两个，且实测同生共死。
 

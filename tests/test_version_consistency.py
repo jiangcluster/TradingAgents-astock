@@ -48,3 +48,17 @@ def test_package_dunder_version_matches_pyproject():
     assert m.group(1) == version, (
         f"tradingagents.__version__ 是 {m.group(1)}，pyproject 是 {version}"
     )
+
+
+def test_headless_docstring_ta_version_matches_pyproject():
+    """`cli/headless.py` 的示例 JSON 里也写了一份 `ta_version`（第五处载体，G15 / 0.5.28）。
+
+    此前只锁四处，于是 0.5.27 发版时这处 docstring 停在 0.5.26——下游按示例对齐会拿到过期版本号。
+    """
+    version = _pyproject_version()
+    text = (ROOT / "cli" / "headless.py").read_text(encoding="utf-8")
+    m = re.search(r'"ta_version"\s*:\s*"([^"]+)"', text)
+    assert m, "cli/headless.py 里找不到 ta_version 示例"
+    assert m.group(1) == version, (
+        f"headless.py 示例 ta_version 是 {m.group(1)}，pyproject 是 {version}"
+    )

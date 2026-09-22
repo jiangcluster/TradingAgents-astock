@@ -9,9 +9,36 @@
 3. 复审提示词的行数与实际审核范围一致，否则模型会为空分析师编评级。
 """
 
+import pathlib
+import re
+
 import pytest
 
 from tradingagents.agents import quality_gate as qg
+
+_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def test_failure_markers_cover_data_layer_failure_strings():
+    """词表必须覆盖数据层**实际**的失败文案（G14 / 0.5.28）。
+
+    此前词表只有 `Error fetching`，而 a_stock 的六处财报类失败返回的是
+    `Error retrieving …` → 门控认不出取数失败，可能把失败当合格数据给 A/B 级。
+    本用例直接从数据层源码提取两族文案并断言词表覆盖：**新增失败文案而忘了同步词表即失败**。
+    """
+    src = (_ROOT / "tradingagents" / "dataflows" / "a_stock.py").read_text(encoding="utf-8")
+    # 只取 `return f"…"` 形态：门控扫的是**进报告的文本**；`raise ValueError("No OHLCV data…")`
+    # 这类内部异常消息由调用方转成"K线数据获取失败：…"（已由"获取失败"覆盖），不属词表范围。
+    verbs = sorted(set(re.findall(r'return f"Error (\w+)', src)))
+    assert verbs, "提取不到 `Error <verb>` 文案（守卫空转，检查数据层文案格式是否变化）"
+    markers = "\n".join(qg.FAILURE_MARKERS)
+    missing = [v for v in verbs if f"Error {v}" not in markers]
+    assert not missing, f"数据层失败文案未进 FAILURE_MARKERS：{[f'Error {v}' for v in missing]}"
+
+    no_data = sorted(set(re.findall(r'return f"No ([\w/\-]+) data', src)))
+    assert no_data, "提取不到 `No <x> data` 文案（守卫空转）"
+    missing_no = [n for n in no_data if f"No {n} data" not in markers]
+    assert not missing_no, f"数据层 No…data 文案未进 FAILURE_MARKERS：{[f'No {n} data' for n in missing_no]}"
 
 
 FULL_REPORT = (

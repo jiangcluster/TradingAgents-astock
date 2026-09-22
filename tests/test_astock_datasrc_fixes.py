@@ -576,6 +576,22 @@ def test_em_breaker_probes_again_after_cooldown(monkeypatch):
     assert a_stock._em_get("https://push2.eastmoney.com/api/qt/clist/get").status_code == 200
 
 
+def test_env_number_falls_back_on_illegal_value(monkeypatch):
+    """G21：阈值/冷却环境变量**非法或缺失一律回落默认**。
+
+    此前在模块导入期直接 `int(os.environ.get(...))`——写错一个可选开关（`EM_BREAKER_FAILS=abc`）
+    会让 `import a_stock` 抛 ValueError，整个数据层不可导入。
+    """
+    monkeypatch.setenv("EM_BREAKER_FAILS", "abc")
+    assert a_stock._env_number("EM_BREAKER_FAILS", 3, int) == 3
+    monkeypatch.setenv("EM_BREAKER_COOLDOWN_SEC", "1m")
+    assert a_stock._env_number("EM_BREAKER_COOLDOWN_SEC", 60.0, float) == 60.0
+    monkeypatch.setenv("EM_BREAKER_FAILS", "5")
+    assert a_stock._env_number("EM_BREAKER_FAILS", 3, int) == 5
+    monkeypatch.delenv("EM_BREAKER_FAILS")
+    assert a_stock._env_number("EM_BREAKER_FAILS", 3, int) == 3
+
+
 # ---------------------------------------------------------------------------
 # get_concept_blocks: 百度 403 → 东财 slist 降级
 # ---------------------------------------------------------------------------

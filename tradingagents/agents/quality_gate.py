@@ -31,6 +31,12 @@ MIN_REPORT_LENGTH = 200
 # "K线数据获取失败：…" / "Error fetching hot stocks for …" / "…查询失败"，而原先
 # 只列了"无法获取"/"unable to fetch" —— 真正失败的报告反而认不出来（长报告里夹带
 # 一行失败信息时尤其明显，长度兜底管不到）。
+# 0.5.28（批 J / G14）：补 `Error retrieving …`（a_stock 的 fundamentals / balance sheet /
+# cash flow / income statement / insider-shareholder / profit forecast 六处**都是**这个动词）
+# 与 `Error calculating …`（技术指标），以及 `No … data` 一族——此前词表只有 `Error fetching`，
+# 而"取数失败"文案里占多数的是 `Error retrieving`，等于门控看不出来。
+# 防漂移：`tests/test_quality_gate.py::test_failure_markers_cover_data_layer_failure_strings`
+# 会从 `a_stock.py` 源码提取这两族文案并断言词表覆盖（新增失败文案忘记同步即失败）。
 FAILURE_MARKERS = [
     "无法获取",
     "获取失败",
@@ -40,6 +46,14 @@ FAILURE_MARKERS = [
     "I don't have access",
     "unable to fetch",
     "Error fetching",
+    "Error retrieving",
+    "Error calculating",
+    "No fundamentals data",
+    "No balance sheet data",
+    "No cash flow data",
+    "No income statement data",
+    "No insider/shareholder data",
+    "No concept/block data",
 ]
 
 

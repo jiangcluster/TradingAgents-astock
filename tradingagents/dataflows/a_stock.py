@@ -598,6 +598,23 @@ _EM_MIRROR = {
     "push2his.eastmoney.com": "push2delay.eastmoney.com",
 }
 
+def _env_number(name: str, default, cast):
+    """读环境变量为数值；**缺失/非法一律回落默认**（0.5.28 / 批 G-G21）。
+
+    此前在模块导入期直接 `int(os.environ.get("EM_BREAKER_FAILS", "3"))`——运维把开关写错
+    （`EM_BREAKER_FAILS=abc`、`EM_BREAKER_COOLDOWN_SEC=1m`）会让 `import a_stock` 直接抛
+    `ValueError`，**整个数据层不可导入**，且报错位置与"熔断"无关、误导排查方向。
+    """
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return cast(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning("环境变量 %s=%r 非法（应为数值）→ 回落默认 %s", name, raw, default)
+        return default
+
+
 # 东财**行情集群**（push2 / push2his / push2delay）连接层熔断（0.5.27）。
 # 为什么需要：封禁是**集群级**的——实测（2026-09-21，A 股服务器）push2 与 push2his 及其
 # 镜像 push2delay 同时 `RemoteDisconnected`，而同域族的 datacenter-web / push2ex **正常**。
@@ -608,11 +625,14 @@ _EM_MIRROR = {
 #      冷却过长会把恢复窗口一起跳掉；
 #   ② **只覆盖集群主机**（`_EM_CLUSTER_HOSTS`）：datacenter-web / search-api / push2ex 不在其中，
 #      它们可用且是龙虎榜/北向/解禁的唯一来源，绝不能被"东财"一词一锅端。
-# 且**只对连接层失败**计数（HTTP 4xx/5xx 不计）；半开——冷却到期后放行一次真实探测，
-# 成功即清零，再失败则重新计时（不用"永久拉黑"，那是把"间歇故障"当"永久故障"）。
+# 且**只对连接层失败**计数（HTTP 4xx/5xx 不计）；冷却到期后**恢复放行**——若再次连续
+# `_EM_BREAKER_FAILS` 次整组失败则重新熔断、任一成功即清零（**不做**"只放行一次探测"的
+# 半开门控：候选只有主站+镜像两个，且二者实测同生共死，单次探测既救不回也挡不住）。
+# （0.5.28 订正措辞：此前注释/CHANGELOG 写成"半开——放行一次真实探测，再失败则重新计时"，
+# 与实现不符——实现是"冷却到期即恢复放行，需再次打满阈值才重开"。）
 _EM_CLUSTER_HOSTS = frozenset(_EM_MIRROR) | {"push2delay.eastmoney.com"}
-_EM_BREAKER_FAILS = int(os.environ.get("EM_BREAKER_FAILS", "3"))
-_EM_BREAKER_COOLDOWN_S = float(os.environ.get("EM_BREAKER_COOLDOWN_SEC", "60"))
+_EM_BREAKER_FAILS = _env_number("EM_BREAKER_FAILS", 3, int)
+_EM_BREAKER_COOLDOWN_S = _env_number("EM_BREAKER_COOLDOWN_SEC", 60.0, float)
 _em_fail_streak = 0
 _em_breaker_until = 0.0
 
@@ -2757,7 +2777,14 @@ def _fund_flow_cache_path() -> str:
 
 
 def _save_fund_flow_snapshot(date_str: str, code: str, values: dict) -> None:
-    """按 (date, code) 去重写入本地缓存；原子替换（多票并行深析的并发安全）。
+    """按 (date, code) 去重写入本地缓存；**读-改-写全程持跨进程锁** + 原子替换。
+
+    0.5.28（批 I / G13）：此前只做原子替换、**不持锁**，docstring 却写"多票并行深析的
+    并发安全"——原子替换只保证"读不到半截文件"，挡不住"两个进程各读到同一份旧表、
+    后写的把先写的行覆盖掉"（丢更新）。深研按 `max_workers` 并行拉多个 TA 子进程、
+    且 `data_cache_dir` 被收敛到同一目录 → 20 日资金流历史（本网络下外部接口不可用，
+    **本地累积是唯一来源**）会缺日，表现为"数据不全"而不是报错。
+    与 `_save_northbound_snapshot` 同口径（见 `_cache_lock`）。
 
     缺字段写 ``nan`` 占位而不是 0，避免把「没取到」伪装成「净流入 0」。
     """
@@ -2765,38 +2792,39 @@ def _save_fund_flow_snapshot(date_str: str, code: str, values: dict) -> None:
     import tempfile
 
     path = _fund_flow_cache_path()
-    existing: dict = {}
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            next(reader, None)
-            for row in reader:
-                if len(row) >= len(_FUND_FLOW_COLUMNS):
-                    existing[(row[0], row[1])] = row[: len(_FUND_FLOW_COLUMNS)]
-    key = (str(date_str)[:10], str(code))
-    row = [key[0], key[1]]
-    for col in _FUND_FLOW_COLUMNS[2:]:
+    with _cache_lock(path):
+        existing: dict = {}
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                next(reader, None)
+                for row in reader:
+                    if len(row) >= len(_FUND_FLOW_COLUMNS):
+                        existing[(row[0], row[1])] = row[: len(_FUND_FLOW_COLUMNS)]
+        key = (str(date_str)[:10], str(code))
+        row = [key[0], key[1]]
+        for col in _FUND_FLOW_COLUMNS[2:]:
+            try:
+                row.append("nan" if values.get(col) is None else f"{float(values[col]):.0f}")
+            except (TypeError, ValueError):
+                row.append("nan")
+        existing[key] = row
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=".fundflow_", suffix=".tmp", dir=os.path.dirname(path)
+        )
         try:
-            row.append("nan" if values.get(col) is None else f"{float(values[col]):.0f}")
-        except (TypeError, ValueError):
-            row.append("nan")
-    existing[key] = row
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=".fundflow_", suffix=".tmp", dir=os.path.dirname(path)
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(_FUND_FLOW_COLUMNS)
-            for k in sorted(existing):
-                writer.writerow(existing[k])
-        os.replace(tmp_path, path)
-    except BaseException:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(_FUND_FLOW_COLUMNS)
+                for k in sorted(existing):
+                    writer.writerow(existing[k])
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 def _load_fund_flow_history(code: str, n: int = 20, cutoff: str = "") -> list:

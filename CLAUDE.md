@@ -6,10 +6,11 @@
 - **仓库**: https://github.com/simonlin1212/TradingAgents-astock
 - **协议**: Apache 2.0
 - **Python**: >=3.10
-- **当前版本**: 0.5.27（2026-09-21 发布）
-  ⚠️ 改版本号时**四处要一起改**：`pyproject.toml` / `CHANGELOG.md` / 这一行 /
+- **当前版本**: 0.5.28（2026-09-22 发布）
+  ⚠️ 改版本号时**五处要一起改**：`pyproject.toml` / `CHANGELOG.md` / 这一行 /
   `tradingagents/__init__.py` 的 `__version__`（headless JSON 的 `ta_version` 取自它，
-  下游靠它做版本握手）。漏任何一处 `tests/test_version_consistency.py` 会拦。
+  下游靠它做版本握手）/ `cli/headless.py` docstring 里的示例 JSON（0.5.28 起纳入守卫）。
+  漏任何一处 `tests/test_version_consistency.py` 会拦。
 
 ## 架构
 
@@ -179,7 +180,10 @@ deepseek-v4-flash 等模型在 tool call 时可能返回中文股票名而非 6 
 
 ### 测试
 **干净 clone（`pip install -e .` 不带 `[agentsdk]`）跑 `pytest tests/` 应当是
-361 passed / 13 skipped / **0 failed**。出现 failed 就是真回归。**
+576 passed / 13 skipped / **0 failed**（数量随版本增长，**判据是 `0 failed`**，不是这个数字；
+最新数字见 `CHANGELOG.md` 顶部条目）。出现 failed 就是真回归。**
+⚠️ 本机若缺 `prompt_toolkit`，`test_cli_default_command.py` / `test_ticker_symbol_handling.py`
+会在**收集阶段**报错（CLI 可选依赖），属环境问题而非回归——可先 `--ignore` 这两个文件。
 需要可选依赖的用例用 `requires_sdk` 标记跳过——⚠️ **占位类型绝不要用 `Exception`
 基类**：`ClaudeSDKError` 曾被占位成 `Exception`，进 `_FALLBACK_ERRORS` 后让"订阅凭据
 失效不得降级到计费 provider"这条护栏彻底失效（v0.5.4 修）。
