@@ -34,8 +34,12 @@ def get_language_instruction() -> str:
     """Return a prompt instruction for the configured output language.
 
     Returns empty string when English (default), so no extra tokens are used.
-    Only applied to user-facing agents (analysts, portfolio manager).
-    Internal debate agents stay in English for reasoning quality.
+
+    0.5.29：**辩论类 agent 一并纳入**（`bull/bear_researcher`、`aggressive/conservative/
+    neutral_debator`）。此前刻意只覆盖"面向用户的 agent"、辩论保持英文（原注释理由是
+    "reasoning quality"），但这些辩论正文会被下游**渲染进交付报告**（a-share-deep-advisor
+    的「多空辩论」「风控三方辩论」章节）→ 交付报告出现大段英文，与"全中文交付"要求冲突。
+    取舍已记入 TA CHANGELOG；把 `output_language` 设回 `English` 即可恢复原行为。
     """
     from tradingagents.dataflows.config import get_config
     lang = get_config().get("output_language", "English")

@@ -12,6 +12,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from tradingagents.agents.managers.research_manager import create_research_manager
+from tradingagents.agents.researchers.bear_researcher import create_bear_researcher
+from tradingagents.agents.researchers.bull_researcher import create_bull_researcher
+from tradingagents.agents.risk_mgmt.aggressive_debator import create_aggressive_debator
+from tradingagents.agents.risk_mgmt.conservative_debator import create_conservative_debator
+from tradingagents.agents.risk_mgmt.neutral_debator import create_neutral_debator
 from tradingagents.agents.schemas import (
     PortfolioRating,
     ResearchPlan,
@@ -21,6 +26,63 @@ from tradingagents.agents.schemas import (
     render_trader_proposal,
 )
 from tradingagents.agents.trader.trader import create_trader
+from tradingagents.dataflows.config import set_config
+
+
+# ---------------------------------------------------------------------------
+# 0.5.29：辩论类 agent 必须同样受 output_language 约束
+# ---------------------------------------------------------------------------
+def _debate_state(kind: str) -> dict:
+    """辩论 agent 所需的最小 state（其余字段用 .get 取默认）。"""
+    state = {
+        "market_report": "行情面", "sentiment_report": "情绪面", "news_report": "新闻面",
+        "fundamentals_report": "基本面", "policy_report": "政策面",
+        "hot_money_report": "资金面", "lockup_report": "解禁面",
+        "data_quality_summary": "质量门：无异常",
+        "trader_investment_plan": "交易员方案", "investment_plan": "研究主管方案",
+    }
+    if kind == "invest":
+        state["investment_debate_state"] = {
+            "history": "", "bull_history": "", "bear_history": "",
+            "current_response": "", "count": 0,
+        }
+    else:
+        state["risk_debate_state"] = {
+            "history": "", "aggressive_history": "", "conservative_history": "",
+            "neutral_history": "", "count": 0,
+        }
+    return state
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("factory,kind", [
+    (create_bull_researcher, "invest"),
+    (create_bear_researcher, "invest"),
+    (create_aggressive_debator, "risk"),
+    (create_conservative_debator, "risk"),
+    (create_neutral_debator, "risk"),
+])
+def test_debate_agents_follow_output_language(factory, kind):
+    """辩论正文会被下游渲染进交付报告（深研「多空辩论」「风控三方辩论」章节）。
+
+    0.5.29 前这 5 个 agent 刻意不注入语言指令（原注释理由"reasoning quality"）→
+    交付报告出现大段英文；现与其余 agent 同口径：`output_language=Chinese` 时注入中文指令，
+    设回 `English` 则不注入（零额外 token）。
+    """
+    try:
+        set_config({"output_language": "Chinese"})
+        llm = MagicMock()
+        llm.invoke.return_value = MagicMock(content="中文辩论正文")
+        factory(llm)(_debate_state(kind))
+        assert "Write your entire response in Chinese" in llm.invoke.call_args[0][0]
+
+        set_config({"output_language": "English"})
+        llm_en = MagicMock()
+        llm_en.invoke.return_value = MagicMock(content="English debate body")
+        factory(llm_en)(_debate_state(kind))
+        assert "Write your entire response" not in llm_en.invoke.call_args[0][0]
+    finally:
+        set_config({"output_language": "Chinese"})      # 还原默认（DEFAULT_CONFIG 即 Chinese）
 
 
 # ---------------------------------------------------------------------------

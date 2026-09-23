@@ -1,5 +1,8 @@
 
 
+from tradingagents.agents.utils.agent_utils import get_language_instruction
+
+
 def create_conservative_debator(llm):
     def conservative_node(state) -> dict:
         risk_debate_state = state["risk_debate_state"]
@@ -62,7 +65,7 @@ one with the data you have and state what would resolve or falsify it. Only when
 you argue against taking exposure at all.
 Judging evidence quality on both sides is part of your job: "the bull case relies on unverifiable
 extrapolation" is a strong argument; "A-shares are structurally risky" is not, because it is true of every
-name. Output conversationally without special formatting."""
+name. Output conversationally without special formatting.{get_language_instruction()}"""
 
         response = llm.invoke(prompt)
 

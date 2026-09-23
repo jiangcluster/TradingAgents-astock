@@ -1,5 +1,8 @@
 
 
+from tradingagents.agents.utils.agent_utils import get_language_instruction
+
+
 def create_neutral_debator(llm):
     def neutral_node(state) -> dict:
         risk_debate_state = state["risk_debate_state"]
@@ -52,7 +55,7 @@ Hot Money / Capital Flow Report: {hot_money_report}
 Lockup Expiry / Insider Reduction Report: {lockup_report}
 Conversation history: {history} Last aggressive argument: {current_aggressive_response} Last conservative argument: {current_conservative_response}. If no responses yet, present your own argument.
 
-Advocate for a balanced, position-sized approach that captures A-share upside while respecting the market's structural constraints. Always state the position-size implication of your view and the condition that would scale it up or down, and do not treat structural constraints (T+1, price limits) as a reason for zero exposure — those constraints apply to every name and belong in the sizing argument, not in the direction argument. Output conversationally without special formatting."""
+Advocate for a balanced, position-sized approach that captures A-share upside while respecting the market's structural constraints. Always state the position-size implication of your view and the condition that would scale it up or down, and do not treat structural constraints (T+1, price limits) as a reason for zero exposure — those constraints apply to every name and belong in the sizing argument, not in the direction argument. Output conversationally without special formatting.{get_language_instruction()}"""
 
         response = llm.invoke(prompt)
 

@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.29] — 2026-09-23
+
+### Changed（辩论类 agent 纳入 `output_language`：交付报告不再出现大段英文）
+
+**触发**：下游（a-share-deep-advisor）报告被指出「大量内容是英文」，实测落点是
+**多空辩论**与**风控三方辩论**两节 —— 它们由本框架的 5 个辩论 agent 产出，正文原样进报告。
+
+**根因**：`get_language_instruction()` 此前只注入给"面向用户的 agent"（7 个分析师 + trader +
+研究经理 + 投组经理），辩论类 agent **刻意不注入**（原 docstring 理由："Internal debate agents
+stay in English for reasoning quality"）。但辩论正文**也是交付内容**（下游按
+`Bull Analyst:` / `Aggressive Analyst:` 等前缀切分并渲染为「多方/空方/激进方/保守方/中立方」），
+于是"内部推理"假设不成立 → 交付报告中英混杂。
+
+- 5 个 agent 的 prompt 末尾追加 `get_language_instruction()`：`bull_researcher`、
+  `bear_researcher`、`aggressive_debator`、`conservative_debator`、`neutral_debator`；
+- `get_language_instruction()` 的 docstring 订正（删去"辩论保持英文"的说明，改为记录本次取舍）；
+- **取舍如实记录**：原作者以"推理质量"为由保留英文，改中文可能影响辩论深度（本地无法量化）；
+  该行为仍受 `output_language` 控制，设为 `English` 即回到"辩论英文"的原行为（零额外 token，
+  英文时指令为空串）。
+
+### Tests
+
+- `tests/test_structured_agents.py` +5（参数化覆盖 5 个辩论 agent）：`output_language=Chinese`
+  时 prompt 必含 `Write your entire response in Chinese`；设为 `English` 时**不注入**
+  （并用 `finally` 还原默认配置，避免污染其他用例）。
+
 ## [0.5.28] — 2026-09-22
 
 ### Fixed（第二轮全面审查 批 J/G/I：契约守卫补全、并发丢更新、词表漏项、环境变量防御）
