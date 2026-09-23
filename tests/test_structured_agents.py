@@ -74,15 +74,39 @@ def test_debate_agents_follow_output_language(factory, kind):
         llm = MagicMock()
         llm.invoke.return_value = MagicMock(content="中文辩论正文")
         factory(llm)(_debate_state(kind))
-        assert "Write your entire response in Chinese" in llm.invoke.call_args[0][0]
+        prompt = llm.invoke.call_args[0][0]
+        assert "Write your entire response in Chinese" in prompt
+        assert "交付格式约束" in prompt          # 0.5.30：格式约束常驻
 
         set_config({"output_language": "English"})
         llm_en = MagicMock()
         llm_en.invoke.return_value = MagicMock(content="English debate body")
         factory(llm_en)(_debate_state(kind))
-        assert "Write your entire response" not in llm_en.invoke.call_args[0][0]
+        prompt_en = llm_en.invoke.call_args[0][0]
+        assert "Write your entire response" not in prompt_en
+        assert "交付格式约束" in prompt_en        # 与语言无关，English 下同样注入
     finally:
         set_config({"output_language": "Chinese"})      # 还原默认（DEFAULT_CONFIG 即 Chinese）
+
+
+@pytest.mark.unit
+def test_output_style_constraint_forbids_scratchpad():
+    """0.5.30：交付格式约束必须**常驻**（与 output_language 无关）。
+
+    背景：模型会在正文里逐个罗列原始数据再手算（"让我列出…求和…平均值=(…)/5="），
+    而这些正文会被下游原样渲染进交付报告 → 读者端全是无效信息
+    （实测 2026-09-22 报告 6529 行中 121 行含"让我"、28 行为明确中间计算）。
+    """
+    from tradingagents.agents.utils.agent_utils import get_language_instruction
+    try:
+        set_config({"output_language": "English"})
+        en = get_language_instruction()
+        assert "交付格式约束" in en and "让我列出" in en and "不要自行逐个累加" in en
+        set_config({"output_language": "Chinese"})
+        zh = get_language_instruction()
+        assert "交付格式约束" in zh and "Write your entire response in Chinese" in zh
+    finally:
+        set_config({"output_language": "Chinese"})
 
 
 # ---------------------------------------------------------------------------

@@ -30,22 +30,35 @@ from tradingagents.agents.utils.signal_data_tools import (
 )
 
 
+# 交付格式约束（0.5.30）：下游会把 agent 正文**原样渲染进交付报告**，而模型的"草稿式
+# 推理"（逐个罗列成交量再手算、试算试错、"让我…"自我叙述）会一并进报告 → 读者端全是
+# 无效信息（实测 2026-09-22 报告 6529 行里 121 行含"让我"、28 行是明确的中间计算）。
+# 与语言约束放在同一函数：该函数已被**全部产出型 agent** 调用（7 分析师 + trader +
+# 研究经理 + 投组经理 + 5 辩论 agent），合并返回可避免新增 15 处调用面。
+_OUTPUT_STYLE = (
+    " 交付格式约束（强制，读者只会看到你的输出正文）："
+    "只输出结论与关键数值，**禁止**输出中间推导过程——"
+    "不得把原始数据逐个罗列后逐项求和、不得展示试算/试错、"
+    "不得出现“让我列出/让我计算/首先，让我/求和：/平均值=(…)/N=”这类自我叙述；"
+    "需要聚合量时直接给结果 + 一行口径（例：近5日均量 1474 万股 vs 近20日 1705 万股），"
+    "不要自行逐个累加；原始数据只用 Markdown 表格呈现关键指标，不粘贴长数组。"
+)
+
+
 def get_language_instruction() -> str:
-    """Return a prompt instruction for the configured output language.
+    """产出型 agent 的**输出约束**：交付格式（恒定）+ 语言（按配置）。
 
-    Returns empty string when English (default), so no extra tokens are used.
+    交付格式约束恒定注入——agent 正文会原样进交付报告，"草稿式推理"与"贴原始数组"
+    属无效信息（见 `_OUTPUT_STYLE` 的实测依据）。
 
-    0.5.29：**辩论类 agent 一并纳入**（`bull/bear_researcher`、`aggressive/conservative/
-    neutral_debator`）。此前刻意只覆盖"面向用户的 agent"、辩论保持英文（原注释理由是
-    "reasoning quality"），但这些辩论正文会被下游**渲染进交付报告**（a-share-deep-advisor
-    的「多空辩论」「风控三方辩论」章节）→ 交付报告出现大段英文，与"全中文交付"要求冲突。
-    取舍已记入 TA CHANGELOG；把 `output_language` 设回 `English` 即可恢复原行为。
+    语言约束（0.5.29）：`output_language=Chinese` 时注入中文指令；设为 `English`
+    （默认）时**不注入**（省 token）。辩论类 agent 一并纳入（此前刻意留英文 →
+    交付报告出现大段英文）；取舍与回退方式见 CHANGELOG 0.5.29。
     """
     from tradingagents.dataflows.config import get_config
     lang = get_config().get("output_language", "English")
-    if lang.strip().lower() == "english":
-        return ""
-    return f" Write your entire response in {lang}."
+    lang_part = "" if lang.strip().lower() == "english" else f" Write your entire response in {lang}."
+    return _OUTPUT_STYLE + lang_part
 
 
 def build_instrument_context(ticker: str) -> str:

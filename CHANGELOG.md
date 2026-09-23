@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.30] — 2026-09-23
+
+### Added（交付格式约束：禁止"草稿式推理"进报告）
+
+**触发**：下游报告被指出「大量无效信息」，样例是市场分析师正文里的逐步手算：
+
+```
+- 近5日（9-16至9-22）：11924700, 17765400, … 平均值=(…)/5=73699600/5=14739920
+- 近20日（约8-24至9-22）：所有成交量求和/20
+让我列出成交量数据（22个）：14480600, 10444300, …
+```
+
+**根因**：市场分析师的 prompt 要求"必采：近 5 日均量 vs 近 20 日均量 + 具体数值"，模型便
+**在正文里逐个罗列成交量再手算**，把草稿留在了交付文本中（实测 2026-09-22 报告 6529 行里
+**121 行**含"让我"、**28 行**是明确的中间计算）。这些正文会被下游原样渲染进报告 → 读者端噪音。
+
+- `agent_utils._OUTPUT_STYLE` 新增**恒定注入**的交付格式约束：只输出结论与关键数值；
+  禁止罗列原始数据逐项求和、禁止试算/试错、禁止"让我列出/求和：/平均值=(…)/N="这类自我叙述；
+  聚合量直接给结果 + 一行口径（例：近5日均量 1474 万股 vs 近20日 1705 万股）；
+  原始数据只用 Markdown 表格，不粘贴长数组。
+- **放在 `get_language_instruction()` 内合并返回**（而非新增独立函数 + 15 处调用面）：
+  该函数已被全部产出型 agent 调用（7 分析师 + trader + 研究经理 + 投组经理 + 5 辩论 agent），
+  合并可零遗忘地覆盖；格式约束**与语言无关**（English 配置下同样注入），语言部分仍只在
+  非 English 时注入。docstring 已按新语义重写。
+
+### Tests
+
+- `tests/test_structured_agents.py` +1（`test_output_style_constraint_forbids_scratchpad`：
+  English/Chinese 两种配置下格式约束都在且含关键禁令），既有 5 例辩论语言用例同步断言格式约束。
+
 ## [0.5.29] — 2026-09-23
 
 ### Changed（辩论类 agent 纳入 `output_language`：交付报告不再出现大段英文）
