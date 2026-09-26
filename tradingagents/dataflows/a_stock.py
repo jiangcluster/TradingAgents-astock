@@ -2342,7 +2342,11 @@ def get_hot_stocks(
     import requests
 
     if not curr_date or curr_date.strip() == "":
-        curr_date = datetime.now().strftime("%Y-%m-%d")
+        # 0.5.35（第 5 类 / 时间与交易日）：空日期=「今天」必须按**市场时区**算。
+        # 此前用 `datetime.now()`（主机本地日期）——主机在 UTC+8 以东（如 UTC+13）
+        # 时当地已翻页，请求的是**第二天**，接口返回空 → 正文写成"当日无涨停/无题材"，
+        # 与"该日确实没有"完全同形（本模块其余"今天"的判定早已统一走 `_market_today()`）。
+        curr_date = _market_today().isoformat()
 
     try:
         url = (

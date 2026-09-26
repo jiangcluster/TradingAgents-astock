@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.35] — 2026-09-26
+
+### Fixed（两处"缺失与正常同形"：用量统计未接线 / "今天"用错时区）
+
+**动因**：第四轮审查（`审查清单.md` §11）的最终复核中，把两条此前"未查/未决"的项查到底——
+一条是 §6 长期挂着的 `工具调用 0 次` 口径，一条是第 5 类（时间与交易日）里 TA 侧**唯一**
+未逐条复核的具体项。
+
+#### 1. 用量统计的**工具级回调**从未接线 → `usage.tool_calls` 恒为 0
+
+- **症状**：报告渲染 headless 的 `usage`，其中"工具调用 0 次"恒成立，读起来像"模型根本没用工具"。
+- **根因（读码确认，非推断）**：`cli/headless.py` 把 `StatsCallbackHandler` 以 `callbacks=`
+  传给 `TradingAgentsGraph`，而 `trading_graph.py::__init__` 只把它塞进 **LLM 构造参数**
+  （覆盖 `on_chat_model_start`/`on_llm_end` ⇒ `llm_calls`/tokens 正常）；
+  **工具事件走的是图运行期的 callbacks** —— `propagation.get_graph_args` 的 docstring 明写
+  该参数是 "for tool execution tracking"。而 `_run_graph` 调
+  `prepare_graph_run(company_name, trade_date)` **没有透传 `callbacks=`**，
+  运行配置里没有回调 ⇒ `StatsCallbackHandler.on_tool_start`（唯一自增 `tool_calls` 的地方）
+  **永不触发**。
+- **修复**：`_run_graph` 透传 `callbacks=self.callbacks`。
+- 测试：`tests/test_headless_cli.py` +2（`_run_graph` 必须把 `self.callbacks` 传给
+  `prepare_graph_run`；`get_graph_args` 收 callbacks 才写进 `config` 的机制侧佐证）。
+
+#### 2. `get_hot_stocks("")` 的"今天"用**主机本地日期**（第 5 类命中）
+
+- 同模块其余"今天"的判定早已统一走 `_market_today()`（显式 UTC+8，配有
+  `test_is_historical_uses_market_timezone_not_host`），只有这一处漏了：主机在 UTC+8 以东
+  （如 UTC+13）时当地已翻页 → 请求的是**第二天**，同花顺返回空 → 正文写成
+  "当日无涨停/无题材"（与"该日确实没有"完全同形）。
+- **修复**：回落 `_market_today().isoformat()`；测试 `tests/test_lookahead_guard.py` +1
+  （固定"主机 UTC+13 / 市场 UTC+8"的假时钟，断言请求 URL 用的是市场日）。
+
+### 备注（第 5 类补查结论：**其余无命中**）
+
+第 5 类（时间与交易日）本轮逐条复核 TA 侧全部时间使用点，结论：
+- 判据类（`_is_historical` / `_market_today` / 缓存 mtime 判定 / 未来行过滤 `_date_is_after`）
+  均已是市场时区或纯日期比较，**无命中**；
+- 熔断/节流用的 `time.time()` 是**同一进程内的单调差值**，与日历时区无关，**不属该缺陷类**；
+- 12 处形如 `# Data retrieved on: …` / `# Retrieved: …` 的**取数时刻展示戳**仍是主机时区
+  ——**已评估为非缺陷、本轮不改**：它们不进任何比较/过滤，只作"数据何时取回"的说明；
+  且非 A 股路径的 `y_finance.py` 有同一写法，只改本文件会新增一处不一致。
+  若日后要求全库时区统一，用一个 `_market_now()` 一并替换（含 `y_finance.py`）。
+
 ## [0.5.34] — 2026-09-26
 
 ### Fixed（审查命中的静默缺陷）/ Changed（文档一致性）/ Added（缺失守卫）

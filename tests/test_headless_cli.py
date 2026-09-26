@@ -204,3 +204,53 @@ def test_load_config_explicit_overrides_stateless_defaults(monkeypatch):
     assert cfg["memory_log_path"] == "/x/mem.md"
     assert cfg["results_dir"] == "/x/logs"
     assert cfg["data_cache_dir"] == "/x/cache"
+
+
+# ---------------------------------------------------------------------------
+# 0.5.35：用量统计的**工具级**回调必须进图运行配置（否则 `usage.tool_calls` 恒 0）
+#
+# 症状：报告里恒输出"工具调用 0 次"（`advisor/report.py` 渲染 headless 的 usage），
+# 读起来像"模型没用工具"。根因不是渲染层：`StatsCallbackHandler.on_tool_start`
+# 只由图运行期的 callbacks 触发，而 `_run_graph` 调 `prepare_graph_run` 时**没透传**
+# callbacks（只把它挂在了 LLM 构造参数上 → 只覆盖 LLM 事件）。
+# ---------------------------------------------------------------------------
+
+def test_run_graph_forwards_callbacks_into_graph_run_config():
+    """`_run_graph` 必须把 `self.callbacks` 透传给 `prepare_graph_run`。"""
+    from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+    seen = {}
+
+    class FakeGraph:
+        def invoke(self, state, **kwargs):
+            seen["kwargs"] = kwargs
+            return {"ok": True}
+
+    def fake_prepare(company, date, callbacks=None):
+        seen["callbacks"] = callbacks
+        return {"s": 1}, {"config": {}}, None
+
+    obj = object.__new__(TradingAgentsGraph)   # 绕开重型 __init__（不连 LLM/行情）
+    obj.debug = False
+    obj.callbacks = ["handler"]
+    obj.graph = FakeGraph()
+    obj.prepare_graph_run = fake_prepare
+    obj.finalize_graph_run = lambda company, date, state: "Buy"
+    obj.close_graph_run = lambda: None
+
+    final_state, signal = obj._run_graph("600519", "2026-09-02")
+
+    assert seen["callbacks"] == ["handler"], "callbacks 未透传 → on_tool_start 永不触发"
+    assert signal == "Buy"
+    assert final_state == {"ok": True}
+
+
+def test_graph_args_put_callbacks_into_run_config():
+    """机制侧佐证：`get_graph_args` 收 callbacks 才会写进 `config`（空则完全不写）。"""
+    from tradingagents.graph.propagation import Propagator
+
+    prop = Propagator()
+    handler = object()
+
+    assert prop.get_graph_args()["config"].get("callbacks") is None
+    assert prop.get_graph_args(callbacks=[handler])["config"]["callbacks"] == [handler]

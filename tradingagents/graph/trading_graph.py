@@ -758,7 +758,15 @@ class TradingAgentsGraph:
 
     def _run_graph(self, company_name, trade_date):
         """Execute the graph and write the resulting state to disk and memory log."""
-        init_agent_state, args, _ = self.prepare_graph_run(company_name, trade_date)
+        # 0.5.35：把 callbacks **透传进图运行配置**。`__init__` 那处只挂到 LLM 构造参数，
+        # 覆盖的是 LLM 事件（`on_chat_model_start`/`on_llm_end`）；**工具级事件**
+        # （`on_tool_start`）由图运行期的 callbacks 触发——`propagation.get_graph_args`
+        # 的 docstring 明写它是 "for tool execution tracking"。此前不透传 →
+        # headless 的 `usage.tool_calls` **恒为 0**，报告里"工具调用 0 次"被读成
+        # "模型没用工具"（真因是统计没接上）。
+        init_agent_state, args, _ = self.prepare_graph_run(
+            company_name, trade_date, callbacks=self.callbacks
+        )
 
         try:
             if self.debug:

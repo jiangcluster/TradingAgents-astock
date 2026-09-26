@@ -281,6 +281,44 @@ def test_is_historical_uses_market_timezone_not_host(monkeypatch):
     assert a_stock._is_historical("2026-08-08") is True
 
 
+def test_get_hot_stocks_empty_date_uses_market_today(monkeypatch):
+    """第 5 类命中（0.5.35）：`get_hot_stocks("")` 的"今天"必须按**市场时区**算。
+
+    此前回落 `datetime.now()`（主机本地日期）→ 主机在 UTC+8 以东时请求的是**第二天**，
+    同花顺返回空，正文写成"当日无涨停/无题材"——与"该日确实没有"完全同形
+    （同 `_is_historical` 那一条，判据统一走 `_market_today()`）。
+    """
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    import requests
+
+    class FakeDatetime(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            # 奥克兰已是 8-10 凌晨，上海仍是 8-09 晚间
+            aware = _dt(2026, 8, 9, 23, 30, tzinfo=_tz(_td(hours=8)))
+            return (aware.astimezone(tz) if tz
+                    else aware.astimezone(_tz(_td(hours=13))).replace(tzinfo=None))
+
+    monkeypatch.setattr(a_stock, "datetime", FakeDatetime)
+    seen = {}
+
+    class FakeResp:
+        def json(self):
+            return {"errocode": 0, "data": []}
+
+    def fake_get(url, **kwargs):
+        seen["url"] = url
+        return FakeResp()
+
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    out = a_stock.get_hot_stocks("")
+
+    assert "date/2026-08-09/" in seen["url"], f"用了主机日期而非市场日期：{seen['url']}"
+    assert "2026-08-09" in out
+
+
 # ---------------------------------------------------------------------------
 # 补防护：北向 / 全球资讯 / 行业对比 / 概念板块 / 解禁（此前都收了日期却不用）
 # ---------------------------------------------------------------------------
