@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.33] — 2026-09-26
+
+### Fixed（官方直连后结构化输出全线失效：推理档拒绝 `tool_choice`）
+
+**动因（A/B 复盘时发现）**：用 `--codes` 复跑 2026-09-24 的 5 只标的，**5/5 全部**
+`final_decision_format=freetext-fallback`；而 09-21~09-24 的网关侧生产记录全是 `structured`。
+
+**根因（服务端实测，非推断）**：官方直连把模型 id 从网关侧 `deepseek-v4-flash` 换成官方
+`deepseek-flash`，而 `llm_clients/capabilities.py` 的能力表**只登记了 `deepseek-v4-*` 与
+`deepseek-reasoner`** —— `deepseek-flash` 落到 `_DEFAULT`（`supports_tool_choice=True`）→
+`with_structured_output` 照常发出 `tool_choice` → DeepSeek 直接 400：
+
+```
+Thinking mode does not support this tool_choice
+```
+
+于是**研究经理 / 交易员 / 投组经理三个决策 agent 全部静默退回自由文本**：评级标签消失
+（`rating_source` 由 `label` 退化为 `bare`）、schema 的必填字段与"不得给价位"等约束只剩
+提示词兜底。旁证：`json_schema` 通道同样不可用（400 "This response_format type is
+unavailable now"）。**该缺陷在 09-26 切换直连当天即生效，尚未污染任何一次生产日跑。**
+
+**改动**：
+
+1. `llm_clients/capabilities.py`：登记 `"deepseek-flash": _DEEPSEEK_THINKING`（与
+   `deepseek-v4-flash` 同档思考模型）。**实测修复后** `with_structured_output` 恢复正常
+   （返回 `PortfolioDecision` 且 `rating` 正确解析）。
+2. `agents/utils/structured.py`：降级链由「tool-calling → 自由文本」改为
+   **「tool-calling → json_mode → 自由文本」**（新增来源标记
+   `FORMAT_STRUCTURED_JSON = "structured-json"`），作为未来未登记型号的兜底。
+   json_mode 的两个硬约束均已处理：① `response_format=json_object` 要求提示词出现
+   `json` 字样（否则 400 "Prompt must contain the word 'json'"）；② langchain **不会**注入
+   schema，缺字段会 `ValidationError`（实测只回 `{"rating": …}`）→ 新增
+   `json_mode_prompt()` 同时补「只输出 JSON」与 `model_json_schema()`，并支持 str / 消息列表
+   两种 prompt 形态（Trader 用后者）。
+3. `agents/managers/research_manager.py`、`agents/managers/portfolio_manager.py`、
+   `agents/trader/trader.py`：各自绑定第二条通道并在调用时传 `json_structured=` 与 `schema=`。
+
+- 测试同步：`tests/test_deepseek_reasoning.py`（新增"官方 id 同样抑制 tool_choice"1 例）、
+  `tests/test_capabilities.py`（新增 json_mode 阶梯 3 例：优先于自由文本、双通道都失败仍退回
+  自由文本、消息列表形态的 schema 注入）。
+
 ## [0.5.32] — 2026-09-26
 
 ### Changed（去偏上移：研究经理校准 + 辩论改「空方开场、多方收尾」）

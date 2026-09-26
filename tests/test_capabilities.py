@@ -150,3 +150,73 @@ def test_optional_tool_call_returning_none_still_falls_back_to_free_text():
     assert out.text == "free text fallback"
     assert out.format == "freetext-fallback"
     plain.invoke.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 0.5.33：三级通道（tool-calling → json_mode → 自由文本）
+# ---------------------------------------------------------------------------
+@pytest.mark.unit
+def test_json_mode_ladder_used_before_free_text():
+    """tool-calling 抛异常 → 走 json_mode（而不是直接自由文本）。
+
+    推理档模型（DeepSeek `deepseek-flash`）会拒绝 `tool_choice`：若没有中间这一级，
+    每次调用都落到自由文本 —— 评级标签消失（`rating_source` 由 `label` 退化为 `bare`），
+    schema 必填字段与"不得给价位"等约束只剩提示词兜底。
+    """
+    from unittest.mock import MagicMock
+    from tradingagents.agents.schemas import TraderProposal
+    from tradingagents.agents.utils.structured import invoke_structured_or_freetext
+
+    structured = MagicMock()
+    structured.invoke.side_effect = RuntimeError("Thinking mode does not support this tool_choice")
+    json_llm = MagicMock()
+    json_llm.invoke.return_value = TraderProposal(action="Hold", reasoning="r")
+    plain = MagicMock()
+
+    out = invoke_structured_or_freetext(
+        structured, plain, "p", lambda p: f"**Action**: {p.action.value}", "Trader",
+        json_structured=json_llm, schema=TraderProposal,
+    )
+
+    assert out.format == "structured-json"
+    assert out.text == "**Action**: Hold"
+    plain.invoke.assert_not_called()            # 没有落到自由文本
+    sent = json_llm.invoke.call_args.args[0]
+    assert "json" in sent.lower()               # API 要求提示词含 json 字样
+    assert "action" in sent                     # 且须自带字段说明（langchain 不注入 schema）
+
+
+@pytest.mark.unit
+def test_json_mode_ladder_falls_back_when_both_channels_fail():
+    from unittest.mock import MagicMock
+    from tradingagents.agents.schemas import TraderProposal
+    from tradingagents.agents.utils.structured import invoke_structured_or_freetext
+
+    structured = MagicMock()
+    structured.invoke.side_effect = RuntimeError("tool_choice rejected")
+    json_llm = MagicMock()
+    json_llm.invoke.side_effect = ValueError("bad json")
+    plain = MagicMock()
+    plain.invoke.return_value = MagicMock(content="free text")
+
+    out = invoke_structured_or_freetext(
+        structured, plain, "p", lambda p: "x", "Trader",
+        json_structured=json_llm, schema=TraderProposal,
+    )
+
+    assert out.format == "freetext-fallback" and out.text == "free text"
+
+
+@pytest.mark.unit
+def test_json_mode_prompt_appends_schema_for_message_lists():
+    """Trader 用的是消息列表：hint 必须落到最后一条消息上。"""
+    from tradingagents.agents.schemas import TraderProposal
+    from tradingagents.agents.utils.structured import json_mode_prompt
+
+    msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "u"}]
+
+    out = json_mode_prompt(msgs, TraderProposal)
+
+    assert out[0]["content"] == "sys"           # 其他消息不动
+    assert out[1]["content"].startswith("u")
+    assert "JSON" in out[1]["content"] and "action" in out[1]["content"]

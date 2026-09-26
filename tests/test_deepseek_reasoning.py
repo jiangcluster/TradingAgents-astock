@@ -153,6 +153,28 @@ class TestDeepSeekReasonerStructuredOutput:
         wrapped = client.with_structured_output(_Sample)
         assert wrapped is not None
 
+    def test_official_thinking_id_flash_suppresses_tool_choice(self):
+        """0.5.33：官方直连的 `deepseek-flash` 与网关侧 `deepseek-v4-flash` 同档。
+
+        未登记时它落到 ``_DEFAULT``（supports_tool_choice=True）→ 每次结构化调用 400
+        （"Thinking mode does not support this tool_choice"）→ 三个决策 agent 全部静默
+        退回自由文本（实测 2026-09-26：A/B 复盘的 5 票全部 `freetext-fallback`）。
+        """
+        from pydantic import BaseModel
+
+        class _Sample(BaseModel):
+            answer: str
+
+        for model in ("deepseek-flash", "deepseek-v4-flash"):
+            client = DeepSeekChatOpenAI(
+                model=model, api_key="placeholder",
+                base_url="https://api.deepseek.com",
+            )
+            wrapped = client.with_structured_output(_Sample)
+            first = wrapped.steps[0] if hasattr(wrapped, "steps") else wrapped
+            kwargs = getattr(first, "kwargs", {})
+            assert kwargs.get("tool_choice") is None or "tool_choice" not in kwargs, model
+
 
 # ---------------------------------------------------------------------------
 # Base class isolation: NormalizedChatOpenAI does NOT have DeepSeek behaviour

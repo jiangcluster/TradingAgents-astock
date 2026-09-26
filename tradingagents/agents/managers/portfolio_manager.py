@@ -31,6 +31,8 @@ _NO_LEVELS_RULE = (
 
 def create_portfolio_manager(llm):
     structured_llm = bind_structured(llm, PortfolioDecision, "Portfolio Manager")
+    # 第二通道：推理档（deepseek-flash）拒绝 tool_choice，json_mode 仍可用（0.5.33）
+    json_structured = bind_structured(llm, PortfolioDecision, "Portfolio Manager", json_mode=True)
 
     def portfolio_manager_node(state) -> dict:
         instrument_context = build_instrument_context(state["company_of_interest"])
@@ -128,6 +130,8 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
             prompt,
             render_pm_decision,
             "Portfolio Manager",
+            json_structured=json_structured,
+            schema=PortfolioDecision,
         )
         final_trade_decision = rendered.text
 

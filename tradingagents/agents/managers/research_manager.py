@@ -12,6 +12,8 @@ from tradingagents.agents.utils.structured import (
 
 def create_research_manager(llm):
     structured_llm = bind_structured(llm, ResearchPlan, "Research Manager")
+    # 第二通道：推理档拒绝 tool_choice，json_mode 仍可用（0.5.33）
+    json_structured = bind_structured(llm, ResearchPlan, "Research Manager", json_mode=True)
 
     def research_manager_node(state) -> dict:
         instrument_context = build_instrument_context(state["company_of_interest"])
@@ -75,6 +77,8 @@ but missing data is not evidence *for* the other side either):
             prompt,
             render_research_plan,
             "Research Manager",
+            json_structured=json_structured,
+            schema=ResearchPlan,
         )
         investment_plan = rendered.text
 

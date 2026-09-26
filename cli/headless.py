@@ -17,7 +17,7 @@
 
     {"code":"600362","date":"2026-09-02","decision":"Buy",
      "rating_source":"label","final_decision_format":"structured",
-     "ta_version":"0.5.32","usage":{"llm_calls":37,"tokens_in":...,"tokens_out":...},
+     "ta_version":"0.5.33","usage":{"llm_calls":37,"tokens_in":...,"tokens_out":...},
      "final_trade_decision":"...","investment_plan":"...",
      "analysis_detail":{
        "analyst_reports":{"market":"...","social":"...",...},

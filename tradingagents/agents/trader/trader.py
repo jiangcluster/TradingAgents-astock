@@ -31,6 +31,8 @@ def _clip(text: str, limit: int) -> str:
 
 def create_trader(llm):
     structured_llm = bind_structured(llm, TraderProposal, "Trader")
+    # 第二通道：推理档拒绝 tool_choice，json_mode 仍可用（0.5.33）
+    json_structured = bind_structured(llm, TraderProposal, "Trader", json_mode=True)
 
     def trader_node(state, name):
         company_name = state["company_of_interest"]
@@ -120,6 +122,8 @@ def create_trader(llm):
             messages,
             render_trader_proposal,
             "Trader",
+            json_structured=json_structured,
+            schema=TraderProposal,
         ).text
 
         return {

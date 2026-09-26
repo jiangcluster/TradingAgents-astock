@@ -68,6 +68,13 @@ _DEFAULT = ModelCapabilities(
 _BY_ID: dict[str, ModelCapabilities] = {
     "deepseek-chat": _DEEPSEEK_CHAT,
     "deepseek-reasoner": _DEEPSEEK_THINKING,
+    # 官方直连的思考档 id（2026-09-26 实测）：与网关侧 `deepseek-v4-flash` 是**同一档
+    # 思考模型**，同样拒绝 `tool_choice` —— 不登记就会落到 `_DEFAULT`（supports_tool_choice=True），
+    # 于是 `with_structured_output` 发出 tool_choice → 每次调用 400
+    # （"Thinking mode does not support this tool_choice"）→ 研究经理/交易员/投组经理
+    # **全部静默退回自由文本**（`final_decision_format=freetext-fallback`、`rating_source` 由
+    # `label` 退化为 `bare`，评级标签消失、schema 约束只剩提示词）。
+    "deepseek-flash": _DEEPSEEK_THINKING,
     "deepseek-v4-flash": _DEEPSEEK_THINKING,
     "deepseek-v4-pro": _DEEPSEEK_THINKING,
     "MiniMax-M2": _MINIMAX_THINKING,
