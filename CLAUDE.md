@@ -6,7 +6,7 @@
 - **仓库**: https://github.com/simonlin1212/TradingAgents-astock
 - **协议**: Apache 2.0
 - **Python**: >=3.10
-- **当前版本**: 0.5.33（2026-09-26 发布）
+- **当前版本**: 0.5.34（2026-09-26 发布）
   ⚠️ 改版本号时**五处要一起改**：`pyproject.toml` / `CHANGELOG.md` / 这一行 /
   `tradingagents/__init__.py` 的 `__version__`（headless JSON 的 `ta_version` 取自它，
   下游靠它做版本握手）/ `cli/headless.py` docstring 里的示例 JSON（0.5.28 起纳入守卫）。
@@ -94,7 +94,10 @@ v0.2.5 起完全移除 akshare 依赖，所有数据通过直连 HTTP API 获取
   第二项 ∈ `label`（显式标签）/ `bare`（正文裸词）/ **`fallback`（一个都没找到，
   返回值只是默认值）**。
 - `invoke_structured_or_freetext()` 返回 `RenderedOutput(text, format)`——format ∈
-  `structured` / `freetext` / `freetext-fallback`。**不要只取 text 丢掉 format**。
+  `structured`（tool-calling）/ `structured-json`（json_mode 兜底通道，0.5.33）/
+  `freetext` / `freetext-fallback`。**不要只取 text 丢掉 format**；
+  判定"是否走了 schema 通道"应**白名单**比 `{"structured", "structured-json"}`，
+  不要黑名单只排 `freetext*`（新降级态会漏网）。
 - 两者落进 state：`final_decision_format`（PM 写）、`rating_source`（`finalize_graph_run`
   写）。headless JSON 透出 `rating_source` / `final_decision_format` / `ta_version` / `usage`。
 - `memory.py` 在 `rating_source == "fallback"` 时把标签记为 `Unknown`，**不得**沿用

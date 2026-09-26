@@ -17,7 +17,7 @@
 
     {"code":"600362","date":"2026-09-02","decision":"Buy",
      "rating_source":"label","final_decision_format":"structured",
-     "ta_version":"0.5.33","usage":{"llm_calls":37,"tokens_in":...,"tokens_out":...},
+     "ta_version":"0.5.34","usage":{"llm_calls":37,"tokens_in":...,"tokens_out":...},
      "final_trade_decision":"...","investment_plan":"...",
      "analysis_detail":{
        "analyst_reports":{"market":"...","social":"...",...},
@@ -115,7 +115,8 @@ def run_headless(
         # 评级来源：label / bare / fallback。fallback 表示终裁里**找不到任何评级词**，
         # decision 只是解析器的默认值，下游不得当作真实判断（差别见 rating.py）。
         "rating_source": str(final_state.get("rating_source", "")),
-        # 终裁形态：structured / freetext / freetext-fallback。
+        # 终裁形态：structured / structured-json / freetext / freetext-fallback。
+        # 判"是否走了 schema 通道"用白名单 {"structured","structured-json"}。
         "final_decision_format": str(final_state.get("final_decision_format", "")),
         # 版本握手：下游缓存与报告据此判断结论出自哪一版 TA。
         "ta_version": TA_VERSION,

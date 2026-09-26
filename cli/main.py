@@ -867,7 +867,8 @@ def update_analyst_statuses(message_buffer, chunk):
     - Analysts with reports = completed
     - First analyst without report = in_progress
     - Remaining analysts without reports = pending
-    - When all analysts done, set Bull Researcher to in_progress
+    - When all analysts done, set **Bear** Researcher to in_progress
+      （0.5.32 起辩论由空方开场；此前为 Bull Researcher）
     """
     selected = message_buffer.selected_analysts
     found_active = False
@@ -1290,7 +1291,11 @@ def _default(
     clear_checkpoints: bool = typer.Option(
         False,
         "--clear-checkpoints",
-        help="Delete all saved checkpoints before running (force fresh start).",
+        help="Delete all saved checkpoints before running (force fresh start). "
+             "RISK: it unlinks every *.db under <data_cache_dir>/checkpoints with no age "
+             "check and no lock — a checkpoint DB still in use by another running process "
+             "(or another ticker's stop-loss state) will be deleted too. Use only when you "
+             "are sure no other run is active (see 批 K/§残余风险 T5).",
     ),
 ):
     """裸跑 `tradingagents`（不带子命令）＝ 直接开始分析。
@@ -1315,7 +1320,10 @@ def analyze(
     clear_checkpoints: bool = typer.Option(
         False,
         "--clear-checkpoints",
-        help="Delete all saved checkpoints before running (force fresh start).",
+        help="Delete all saved checkpoints before running (force fresh start). "
+             "RISK: unlinks every *.db under <data_cache_dir>/checkpoints with no age check "
+             "and no lock — may delete a checkpoint DB still in use by another running "
+             "process (see 批 K/§残余风险 T5).",
     ),
 ):
     if clear_checkpoints:

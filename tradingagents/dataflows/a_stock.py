@@ -583,10 +583,29 @@ _UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 # 请求一律走 _em_get()：串行限流（最小间隔 + 随机抖动）+ 复用 Keep-Alive 会话 + 默认 UA。
 # 注意：仅东财接口走此入口；mootdx(TCP) / 腾讯 / 新浪 / 同花顺 / 财联社 / 百度 等
 # 不限流（实测不封 IP 或风控极弱）。批量任务可调大 EM_MIN_INTERVAL 进一步降速。
+def _env_number(name: str, default, cast):
+    """读环境变量为数值；**缺失/非法一律回落默认**（0.5.28 / 批 G-G21）。
+
+    此前在模块导入期直接 `int(os.environ.get("EM_BREAKER_FAILS", "3"))`——运维把开关写错
+    （`EM_BREAKER_FAILS=abc`、`EM_BREAKER_COOLDOWN_SEC=1m`）会让 `import a_stock` 直接抛
+    `ValueError`，**整个数据层不可导入**，且报错位置与"熔断"无关、误导排查方向。
+    0.5.34 / 批 L：本 helper 上移到节流常量之前，**所有**模块级数值开关都走它
+    （此前 `EM_MIN_INTERVAL` 仍是裸 `float(os.environ…)`，同一坑的第二处）。
+    """
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return cast(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning("环境变量 %s=%r 非法（应为数值）→ 回落默认 %s", name, raw, default)
+        return default
+
+
 _EM_SESSION = _requests.Session()
 _EM_SESSION.headers.update({"User-Agent": _UA})
 # 两次东财请求最小间隔(秒)；批量多 Agent 场景可设环境变量 EM_MIN_INTERVAL=1.5~2 降速。
-_EM_MIN_INTERVAL = float(os.environ.get("EM_MIN_INTERVAL", "1.0"))
+_EM_MIN_INTERVAL = _env_number("EM_MIN_INTERVAL", 1.0, float)
 _em_last_call = [0.0]  # 模块级上次东财请求时间戳
 
 # push2 / push2his 主站在部分机房会被间歇性断连（RemoteDisconnected /
@@ -597,22 +616,6 @@ _EM_MIRROR = {
     "push2.eastmoney.com": "push2delay.eastmoney.com",
     "push2his.eastmoney.com": "push2delay.eastmoney.com",
 }
-
-def _env_number(name: str, default, cast):
-    """读环境变量为数值；**缺失/非法一律回落默认**（0.5.28 / 批 G-G21）。
-
-    此前在模块导入期直接 `int(os.environ.get("EM_BREAKER_FAILS", "3"))`——运维把开关写错
-    （`EM_BREAKER_FAILS=abc`、`EM_BREAKER_COOLDOWN_SEC=1m`）会让 `import a_stock` 直接抛
-    `ValueError`，**整个数据层不可导入**，且报错位置与"熔断"无关、误导排查方向。
-    """
-    raw = os.environ.get(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        return cast(str(raw).strip())
-    except (TypeError, ValueError):
-        logger.warning("环境变量 %s=%r 非法（应为数值）→ 回落默认 %s", name, raw, default)
-        return default
 
 
 # 东财**行情集群**（push2 / push2his / push2delay）连接层熔断（0.5.27）。
@@ -706,8 +709,15 @@ def _em_get(url, params=None, headers=None, timeout=15, **kwargs):
                     cand, params=params, headers=headers, timeout=timeout, **kwargs
                 )
             except (
-                _requests.exceptions.ConnectionError,
+                _requests.exceptions.ConnectionError,       # 含 SSLError / RemoteDisconnected 包装
                 _requests.exceptions.Timeout,
+                # 0.5.34 / 批 L：补两类**传输层**异常——它们此前不计入熔断，
+                # 而上游封禁时恰恰常以"响应体截断"表现（实测 push2 返回
+                # Empty reply / RemoteDisconnected）。漏计 → 熔断永不打开 →
+                # 每次调用仍付 1s 节流 + 主站/镜像两次无效请求（正是 0.5.27 要消除的放大器）。
+                # 仍**不**计入 HTTP 4xx/5xx：那说明服务端有响应（走下方 status_code 分支）。
+                _requests.exceptions.ChunkedEncodingError,
+                _requests.exceptions.ContentDecodingError,
             ) as e:
                 if has_next:
                     logger.warning(
@@ -3090,6 +3100,21 @@ def get_fund_flow(
 # 15. Dragon Tiger Board (龙虎榜)
 # ---------------------------------------------------------------------------
 
+def _wan(value) -> str:
+    """席位金额渲染（元 → 万元，1 位小数）；**字段缺失/None → `—`（不是 `0`）**。
+
+    0.5.34：此前 `(row.get("BUY") or 0) / 10000` 把"服务端没回这个字段"渲染成 `0 万`
+    ——模型会把"缺失"读成"该席位零成交/零净额"，与深研侧"金额不可得显示 `—`"的口径不齐。
+    非数值字符串（`"-"`、空串）同样按不可得处理。
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return "—"
+    try:
+        return f"{float(value) / 10000:.1f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def get_dragon_tiger_board(
     ticker: str,
     trade_date: str,
@@ -3157,12 +3182,17 @@ def get_dragon_tiger_board(
                      f"**无法判断**是否上榜；这不是「近{look_back_days}日未上榜」")
 
     # 2. 最近上榜的买卖席位 — eastmoney datacenter direct HTTP
-    try:
-        if data:
-            latest_date = str(data[0].get("TRADE_DATE", ""))[:10]
-            lines.append(f"\n## 最近上榜席位明细 ({latest_date})")
+    # 0.5.34 / 批 L：**先绑定**两个列表。此前它们只在下面的 try 内赋值，若该 try 抛异常
+    # 会被 `except Exception: pass` 吞掉 → 第 3 段"机构动向"引用未绑定名字 → NameError
+    # 又被自身 except 吞掉 → **机构动向整段静默缺失**，与"该股无机构席位"同形
+    # （模型会把"没看到机构"当事实）。
+    buy_data, sell_data = [], []
+    if data:
+        latest_date = str(data[0].get("TRADE_DATE", ""))[:10]
+        lines.append(f"\n## 最近上榜席位明细 ({latest_date})")
 
-            # 买入席位
+        # 买入席位
+        try:
             buy_data = _eastmoney_datacenter(
                 "RPT_BILLBOARD_DAILYDETAILSBUY",
                 filter_str=f"(TRADE_DATE='{latest_date}')(SECURITY_CODE=\"{code}\")",
@@ -3170,19 +3200,21 @@ def get_dragon_tiger_board(
                 sort_columns="BUY",
                 sort_types="-1",
             )
-            if buy_data:
-                lines.append("\n### 买入席位 TOP5")
-                lines.append("营业部 | 买入(万) | 卖出(万) | 净额(万)")
-                for row in buy_data[:5]:
-                    buy_amt = round((row.get("BUY") or 0) / 10000, 1)
-                    sell_amt = round((row.get("SELL") or 0) / 10000, 1)
-                    net = round((row.get("NET") or 0) / 10000, 1)
-                    lines.append(
-                        f"  {row.get('OPERATEDEPT_NAME', '')} "
-                        f"| {buy_amt:.0f} | {sell_amt:.0f} | {net:.0f}"
-                    )
+        except Exception as e:
+            lines.append(f"[数据缺失: 龙虎榜] 买入席位查询失败"
+                         f"（{type(e).__name__}: {e}）——机构动向可能不完整")
+        if buy_data:
+            lines.append("\n### 买入席位 TOP5")
+            lines.append("营业部 | 买入(万) | 卖出(万) | 净额(万)")
+            for row in buy_data[:5]:
+                lines.append(
+                    f"  {row.get('OPERATEDEPT_NAME', '')} "
+                    f"| {_wan(row.get('BUY'))} | {_wan(row.get('SELL'))} "
+                    f"| {_wan(row.get('NET'))}"
+                )
 
-            # 卖出席位
+        # 卖出席位
+        try:
             sell_data = _eastmoney_datacenter(
                 "RPT_BILLBOARD_DAILYDETAILSSELL",
                 filter_str=f"(TRADE_DATE='{latest_date}')(SECURITY_CODE=\"{code}\")",
@@ -3190,19 +3222,18 @@ def get_dragon_tiger_board(
                 sort_columns="SELL",
                 sort_types="-1",
             )
-            if sell_data:
-                lines.append("\n### 卖出席位 TOP5")
-                lines.append("营业部 | 买入(万) | 卖出(万) | 净额(万)")
-                for row in sell_data[:5]:
-                    buy_amt = round((row.get("BUY") or 0) / 10000, 1)
-                    sell_amt = round((row.get("SELL") or 0) / 10000, 1)
-                    net = round((row.get("NET") or 0) / 10000, 1)
-                    lines.append(
-                        f"  {row.get('OPERATEDEPT_NAME', '')} "
-                        f"| {buy_amt:.0f} | {sell_amt:.0f} | {net:.0f}"
-                    )
-    except Exception:
-        pass
+        except Exception as e:
+            lines.append(f"[数据缺失: 龙虎榜] 卖出席位查询失败"
+                         f"（{type(e).__name__}: {e}）——机构动向可能不完整")
+        if sell_data:
+            lines.append("\n### 卖出席位 TOP5")
+            lines.append("营业部 | 买入(万) | 卖出(万) | 净额(万)")
+            for row in sell_data[:5]:
+                lines.append(
+                    f"  {row.get('OPERATEDEPT_NAME', '')} "
+                    f"| {_wan(row.get('BUY'))} | {_wan(row.get('SELL'))} "
+                    f"| {_wan(row.get('NET'))}"
+                )
 
     # 3. 机构动向 — 从买卖席位明细筛选机构专用席位 (OPERATEDEPT_CODE="0")
     try:

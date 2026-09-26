@@ -245,7 +245,7 @@ eastmoney 全系北向资金接口（含 akshare `stock_hsgt_hist_em`、datacent
 |------|------|
 | `tradingagents/agents/utils/agent_states.py` | `AgentState` 新增 `data_quality_summary` 字段 |
 | `tradingagents/agents/__init__.py` | 导出 `create_quality_gate` |
-| `tradingagents/graph/setup.py` | 新增 "Quality Gate" 节点，接线：最后一个 analyst Msg Clear → Quality Gate → Bull Researcher |
+| `tradingagents/graph/setup.py` | 新增 "Quality Gate" 节点，接线：最后一个 analyst Msg Clear → Quality Gate → **Bear Researcher**（0.5.32 起辩论改为"空方开场、多方收尾"；此前为 → Bull Researcher） |
 | 7 个 analyst 文件 | 每个 prompt 末尾新增 📋 必采清单（market 5 项 / social 5 项 / news 5 项 / fundamentals 7 项 / policy 5 项 / hot_money 6 项 / lockup 5 项） |
 | `tradingagents/agents/researchers/bull_researcher.py` | 读取 `data_quality_summary` + prompt 注入质量警告 |
 | `tradingagents/agents/researchers/bear_researcher.py` | 同上 |
@@ -383,7 +383,7 @@ Week 1-7 共 **47 个文件**受影响（含 22 原有修改 + 22 新增 + 3 配
 - `tradingagents/agents/analysts/policy_analyst.py` (新增)
 - `tradingagents/agents/analysts/hot_money_tracker.py` (新增)
 - `tradingagents/agents/analysts/lockup_watcher.py` (新增)
-- `tradingagents/agents/conditional_logic.py`
+- `tradingagents/graph/conditional_logic.py`
 - `tradingagents/graph/trading_graph.py`
 - `tradingagents/graph/setup.py`
 - `tradingagents/agents/researchers/bull_researcher.py`

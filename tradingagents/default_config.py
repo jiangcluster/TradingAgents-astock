@@ -1,6 +1,29 @@
+import logging
 import os
 
+logger = logging.getLogger(__name__)
+
 _TRADINGAGENTS_HOME = os.path.join(os.path.expanduser("~"), ".tradingagents")
+
+
+def _env_int(name: str, default=None):
+    """读整型环境变量；**缺失/空/非法一律回落默认**（0.5.34 / 批 L）。
+
+    此前 `int(os.environ["TRADINGAGENTS_MAX_TOKENS"]) if os.environ.get(...) else None`
+    只防了"没设"，**没防"设错"**：`TRADINGAGENTS_MAX_TOKENS=abc` 会让
+    `import tradingagents.default_config` 直接抛 `ValueError` → 整个引擎不可用，
+    且报错栈与"环境变量"无关（与 `a_stock._env_number` 修的是同一类坑，那是第二处）。
+    """
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning("环境变量 %s=%r 非法（应为整数）→ 忽略，改用默认值 %r",
+                       name, raw, default)
+        return default
+
 
 DEFAULT_CONFIG = {
     "project_dir": os.path.abspath(os.path.join(os.path.dirname(__file__), ".")),
@@ -33,11 +56,7 @@ DEFAULT_CONFIG = {
     # 走 anthropic 通道跑**第三方模型**（Kimi 等）时尤其要注意：langchain-anthropic
     # 认不出这些模型名，会落到一个很小的兜底值，所以 anthropic 客户端对非 Claude
     # 模型自带一个更宽的默认值，见 llm_clients/anthropic_client.py。
-    "max_tokens": (
-        int(os.environ["TRADINGAGENTS_MAX_TOKENS"])
-        if os.environ.get("TRADINGAGENTS_MAX_TOKENS")
-        else None
-    ),
+    "max_tokens": _env_int("TRADINGAGENTS_MAX_TOKENS"),
     # 可选：给单个角色单独指定模型（#39）。留空 = 全部角色沿用上面的
     # quick/deep 两档，行为与以前完全一致——大多数人只有一家模型，不需要碰这里。
     #

@@ -6,6 +6,69 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.34] — 2026-09-26
+
+### Fixed（审查命中的静默缺陷）/ Changed（文档一致性）/ Added（缺失守卫）
+
+**动因**：按 `审查清单.md`（13 类缺陷 + B1~B10 基线台账）对 TA 做全面审查，命中 8 条
+（T1~T6 历史遗留/真遗漏 + N1~N4 本轮新增），本版处置其中「代码可修」的部分；
+**核心判据是"消费者可见性"**——每一条都问：这个缺陷在研报正文里长什么样、会不会被读成事实。
+
+#### T1 龙虎榜「机构动向」整段静默缺失（最严重）
+
+`tradingagents/dataflows/a_stock.py` 的 `get_dragon_tiger_board` 第 3 段"机构动向"引用
+`buy_data` / `sell_data`，而这两个名字**只在第 2 段的 `try` 内赋值**；该 `try` 一旦抛异常
+被自己的 `except Exception: pass` 吞掉 → 第 3 段 `NameError` → 又被其自身 `except` 吞掉 →
+**整段机构动向消失**，与"该股确实无机构席位"在报告里**完全同形**（模型会把"没看到机构"
+当事实）。修复：两个列表**在第 2 段之前前置绑定**，并让两段各自独立 `try/except`、
+失败时写入 `[数据缺失: 龙虎榜] 买入/卖出席位查询失败（…）——机构动向可能不完整`。
+
+#### T2 两处裸环境变量转换：写错一个开关 = 整个模块不可导入
+
+- `dataflows/a_stock.py`：`EM_MIN_INTERVAL` 仍是裸 `float(os.environ.get(...))`
+  （上一版只把 `EM_BREAKER_*` 纳入 `_env_number`）→ 改走 `_env_number`，并把该 helper
+  **上移到节流常量之前**；
+- `default_config.py`：`TRADINGAGENTS_MAX_TOKENS` 用
+  `int(os.environ[...]) if os.environ.get(...) else None`，只防"没设"、**没防"设错"** →
+  `=abc` 会让 `import tradingagents.default_config` 抛 `ValueError`（报错栈与"环境变量"
+  无关，误导排查）。新增 `_env_int()`（含 `logger.warning` 回落）。
+
+#### T6 传输层异常不计入熔断 → 熔断永不打开
+
+`_em_get` 的异常元组只有 `HTTPError`，而实测封禁常以**响应体截断**表现
+（`Empty reply` / `RemoteDisconnected`）→ 漏计 → 熔断永不打开 → 每次调用仍付 1s 节流 +
+主站/镜像两次无效请求（正是 0.5.27 要消除的放大器）。补 `ConnectionError` / `Timeout` /
+`ChunkedEncodingError` / `ContentDecodingError`；**仍不计** HTTP 4xx/5xx（服务端有响应，
+走 `status_code` 分支）。
+
+#### 席位金额 `0万` → `—`（数据缺失被渲染成事实）
+
+`(row.get("BUY") or 0) / 10000` 把"服务端没回这个字段"渲染成 `0 万`。新增 `_wan()` 助手，
+缺失一律渲染 `—`。
+
+#### 文档/文案一致性（批 K）
+
+- `CHANGES_FROM_UPSTREAM.md`：① 接线说明改为 **Bear Researcher**（0.5.32 起辩论空方开场）；
+  ② 涉及文件清单里的悬空路径 `tradingagents/agents/conditional_logic.py` 订正为
+  `tradingagents/graph/conditional_logic.py`（同文档另一处本就写对）；
+- `cli/main.py`：进度条注释 `Bull Researcher` → `**Bear** Researcher`；
+- `tradingagents/agents/utils/agent_states.py`：`final_decision_format` 枚举补 `structured-json`；
+- `CLAUDE.md`：结构化输出说明补第三条通道 +「**白名单**判定」指引（新增降级态须同步
+  `utils/structured.py` 常量与深研告警白名单）；
+- `cli/headless.py`：注释同步；
+- 两处 `--clear-checkpoints` 的 `--help` 补 **RISK** 披露（无 age 判据、无锁的 `unlink`，
+  会连当日中断任务一起删）——本轮选定"用文档披露风险"而非改清理语义。
+
+### Added
+
+- `tests/test_repo_guard.py`（8 例）：补齐 `审查清单.md` §8 记着的 TA 侧**缺失守卫**——
+  **B1** 文档引用路径必须真实存在（含 `_NON_REPO_REFS` 豁免表 + 豁免必须写理由的元测试）、
+  **B7** 仓内不得有 `.env`/临时备份残留/私钥或 `sk-` 形态密钥（私钥"针"**拼接构造**，
+  否则守卫自己会被判为内嵌私钥）、**B9** 守卫不得空转（提取器须真能提出令牌、且能判出一个
+  伪造的缺失路径）、**T5** `--clear-checkpoints` 的 help 必须写明风险。
+  （**B6 `skills_guard` / B8 部署位对 TA 不适用**——TA 不经 hermes 安装、无 `~/.local/bin`
+  入口，这是明确的不适用，不是"已覆盖"。）
+
 ## [0.5.33] — 2026-09-26
 
 ### Fixed（官方直连后结构化输出全线失效：推理档拒绝 `tool_choice`）

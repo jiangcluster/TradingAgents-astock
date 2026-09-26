@@ -79,7 +79,8 @@ class AgentState(MessagesState):
         RiskDebateState, "Current state of the debate on evaluating risk"
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
-    # 终裁产出的形态：structured / freetext / freetext-fallback（见 utils/structured.py）。
+    # 终裁产出的形态：structured / structured-json / freetext / freetext-fallback
+    # （见 utils/structured.py；`structured-json` 是 0.5.33 新增的 json_mode 通道）。
     # 自由文本不保证带 `**Rating**:` 标签——不记录来源就无法区分"模型说 Hold"与
     # "评级没解析出来、落到了默认值"。
     final_decision_format: Annotated[str, "How the final decision was produced (structured vs free text)"]
