@@ -735,15 +735,22 @@ def _em_get(url, params=None, headers=None, timeout=15, **kwargs):
         _em_last_call[0] = time.time()
 
 
-def _eastmoney_datacenter(
+def _eastmoney_datacenter_checked(
     report_name: str,
     columns: str = "ALL",
     filter_str: str = "",
     page_size: int = 50,
     sort_columns: str = "",
     sort_types: str = "-1",
-) -> list[dict]:
-    """东财数据中心统一查询 — 龙虎榜/解禁 共用."""
+) -> tuple:
+    """东财数据中心查询 → `(rows, ok)`；**`ok=False` 仅表示响应缺 `result`**。
+
+    0.5.31：把「服务端异常/风控返回错误 JSON」（顶层 `result` 缺失）与「该期确实无数据」
+    （`result` 存在、`data` 为空）**分开**——此前两者都返回 `[]`，`get_dragon_tiger_board`
+    会把取数故障写成"近30日未上龙虎榜"这种**看起来完全正常**的结论，模型据此认定
+    "无游资参与/抛压干净"（2026-09-24 实况：同一只票的资金面报告里同时出现
+    "龙虎榜无当日数据（连接故障）"与"近30日未上龙虎榜"，两句话互相矛盾）。
+    """
     params = {
         "reportName": report_name,
         "columns": columns,
@@ -757,9 +764,28 @@ def _eastmoney_datacenter(
     }
     r = _em_get(_DATACENTER_URL, params=params, timeout=15)
     d = r.json()
-    if d.get("result") and d["result"].get("data"):
-        return d["result"]["data"]
-    return []
+    if not isinstance(d, dict) or not d.get("result"):
+        return [], False
+    rows = d["result"].get("data")
+    return (list(rows) if rows else []), True
+
+
+def _eastmoney_datacenter(
+    report_name: str,
+    columns: str = "ALL",
+    filter_str: str = "",
+    page_size: int = 50,
+    sort_columns: str = "",
+    sort_types: str = "-1",
+) -> list[dict]:
+    """东财数据中心统一查询 — 龙虎榜/解禁 共用（不可用时返回 `[]`，行为不变）。
+
+    需要区分"取数失败"与"该期无数据"的调用方改用 `_eastmoney_datacenter_checked`。
+    """
+    return _eastmoney_datacenter_checked(
+        report_name, columns=columns, filter_str=filter_str, page_size=page_size,
+        sort_columns=sort_columns, sort_types=sort_types,
+    )[0]
 
 
 def _fmt_int(value) -> str:
@@ -3078,8 +3104,9 @@ def get_dragon_tiger_board(
     lines = [f"# 龙虎榜数据 | {code} | {trade_date} (近{look_back_days}日)"]
 
     # 1. 上榜记录 — eastmoney datacenter direct HTTP
+    data, fetch_ok = [], True
     try:
-        data = _eastmoney_datacenter(
+        data, fetch_ok = _eastmoney_datacenter_checked(
             "RPT_DAILYBILLBOARD_DETAILSNEW",
             filter_str=(
                 f"(TRADE_DATE>='{start_date_str}')"
@@ -3090,7 +3117,14 @@ def get_dragon_tiger_board(
             sort_columns="TRADE_DATE",
             sort_types="-1",
         )
-        if not data:
+        if not fetch_ok:
+            # 0.5.31：取数失败**不得**写成"未上龙虎榜"——那句话在研报里会被当作
+            # "没有游资参与/抛压干净"的证据（模型无法分辨"缺数据"与"事实为无"）。
+            lines.append(
+                f"\n[数据缺失: 龙虎榜] 取数失败（东财 datacenter 响应缺 `result`：服务端异常或风控），"
+                f"**无法判断**近 {look_back_days} 日是否上榜——**不要**读作「未上龙虎榜」。"
+            )
+        elif not data:
             lines.append(f"\n近{look_back_days}日未上龙虎榜。")
         else:
             lines.append(f"\n## 上榜记录 ({len(data)} 次)")
@@ -3098,14 +3132,19 @@ def get_dragon_tiger_board(
             for row in data:
                 net_buy = round((row.get("BILLBOARD_NET_AMT") or 0) / 10000, 1)
                 turnover = round(float(row.get("TURNOVERRATE") or 0), 2)
+                # 实测线上字段名为 `EXPLAIN`（`EXPLANATION` 仅见于旧版报表）——
+                # 只读后者会让"上榜原因"整列为空。
+                reason = row.get("EXPLAIN") or row.get("EXPLANATION") or ""
                 lines.append(
                     f"  {str(row.get('TRADE_DATE', ''))[:10]} "
-                    f"| {row.get('EXPLANATION', '')} "
+                    f"| {reason} "
                     f"| {net_buy:.0f} "
                     f"| {turnover:.2f}%"
                 )
     except Exception as e:
-        lines.append(f"龙虎榜列表查询失败: {e}")
+        # 连接失败同样不得与"未上榜"混淆
+        lines.append(f"[数据缺失: 龙虎榜] 查询失败（{type(e).__name__}: {e}）——"
+                     f"**无法判断**是否上榜；这不是「近{look_back_days}日未上榜」")
 
     # 2. 最近上榜的买卖席位 — eastmoney datacenter direct HTTP
     try:

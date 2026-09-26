@@ -801,3 +801,64 @@ def test_get_fundamentals_eps_forecast_empty_skips_section(monkeypatch):
 
     assert "Consensus EPS Forecast" not in out
     assert "FY" not in out
+
+
+# ---------------------------------------------------------------------------
+# 0.5.31: 龙虎榜「取数失败」不得写成「近30日未上龙虎榜」
+# ---------------------------------------------------------------------------
+
+def _patch_datacenter(monkeypatch, payload, raises=None):
+    """把 `_em_get` 换成返回给定 JSON 的替身（datacenter 走同一入口）。"""
+
+    def _fake(url, params=None, headers=None, timeout=15, **kwargs):
+        if raises is not None:
+            raise raises
+        return FakeResp(payload)
+
+    monkeypatch.setattr(a_stock, "_em_get", _fake)
+
+
+def test_datacenter_checked_distinguishes_missing_result(monkeypatch):
+    """`result` 缺失（服务端异常/风控）与 `data` 为空（该期无数据）必须可区分。"""
+    _patch_datacenter(monkeypatch, {"result": None, "success": False, "code": 9201})
+    rows, ok = a_stock._eastmoney_datacenter_checked("RPT_DAILYBILLBOARD_DETAILSNEW")
+    assert rows == [] and ok is False
+    # 旧入口保持原语义（不可用 → []），其余调用方行为不变
+    assert a_stock._eastmoney_datacenter("RPT_DAILYBILLBOARD_DETAILSNEW") == []
+
+    _patch_datacenter(monkeypatch, {"result": {"data": []}, "success": True})
+    rows, ok = a_stock._eastmoney_datacenter_checked("RPT_DAILYBILLBOARD_DETAILSNEW")
+    assert rows == [] and ok is True
+
+
+def test_dragon_tiger_fetch_failure_is_reported_as_data_missing(monkeypatch):
+    _patch_datacenter(monkeypatch, {"result": None, "success": False})
+    out = a_stock.get_dragon_tiger_board("000981", "2026-09-24")
+    assert "[数据缺失: 龙虎榜] 取数失败" in out
+    assert "近30日未上龙虎榜。" not in out      # 不得给出"结论式"的未上榜断言
+
+
+def test_dragon_tiger_empty_result_is_no_listing(monkeypatch):
+    _patch_datacenter(monkeypatch, {"result": {"data": []}, "success": True})
+    out = a_stock.get_dragon_tiger_board("000981", "2026-09-24")
+    assert "近30日未上龙虎榜。" in out
+    assert "数据缺失" not in out
+
+
+def test_dragon_tiger_query_exception_is_not_misread(monkeypatch):
+    _patch_datacenter(monkeypatch, None, raises=ConnectionError("boom"))
+    out = a_stock.get_dragon_tiger_board("000981", "2026-09-24")
+    assert "[数据缺失: 龙虎榜] 查询失败" in out
+    assert "近30日未上龙虎榜。" not in out
+
+
+def test_dragon_tiger_lists_records_reading_explain_field(monkeypatch):
+    """线上字段名是 `EXPLAIN`（旧代码只读 `EXPLANATION` → 上榜原因整列为空）。"""
+    _patch_datacenter(monkeypatch, {"result": {"data": [
+        {"TRADE_DATE": "2026-09-17 00:00:00", "EXPLAIN": "日涨幅偏离值达到7%的前5只证券",
+         "BILLBOARD_NET_AMT": 393530000.0, "TURNOVERRATE": 9.3197},
+    ]}, "success": True})
+    out = a_stock.get_dragon_tiger_board("000981", "2026-09-23")
+    assert "## 上榜记录 (1 次)" in out
+    assert "日涨幅偏离值达到7%的前5只证券" in out
+    assert "近30日未上龙虎榜" not in out

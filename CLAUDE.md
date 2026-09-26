@@ -6,7 +6,7 @@
 - **仓库**: https://github.com/simonlin1212/TradingAgents-astock
 - **协议**: Apache 2.0
 - **Python**: >=3.10
-- **当前版本**: 0.5.30（2026-09-23 发布）
+- **当前版本**: 0.5.31（2026-09-26 发布）
   ⚠️ 改版本号时**五处要一起改**：`pyproject.toml` / `CHANGELOG.md` / 这一行 /
   `tradingagents/__init__.py` 的 `__version__`（headless JSON 的 `ta_version` 取自它，
   下游靠它做版本握手）/ `cli/headless.py` docstring 里的示例 JSON（0.5.28 起纳入守卫）。
