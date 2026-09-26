@@ -167,14 +167,16 @@ class GraphSetup:
             )
             workflow.add_edge(current_tools, current_analyst)
 
-            # Connect to next analyst or to Bull Researcher if this is the last analyst
+            # Connect to next analyst or to the debate entry if this is the last analyst
             if i < len(selected_analysts) - 1:
                 next_analyst = f"{selected_analysts[i+1].capitalize()} Analyst"
                 workflow.add_edge(current_clear, next_analyst)
             else:
                 workflow.add_edge(current_clear, "Quality Gate")
 
-        workflow.add_edge("Quality Gate", "Bull Researcher")
+        # 0.5.31：辩论由**空方开场、多方收尾**（此前多方开场、空方收尾 → 空方永远
+        # 拿到最后一句话；见 `ConditionalLogic.should_continue_debate` 的说明）。
+        workflow.add_edge("Quality Gate", "Bear Researcher")
 
         # Add remaining edges
         workflow.add_conditional_edges(

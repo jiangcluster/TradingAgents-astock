@@ -83,15 +83,18 @@ def test_tool_round_count_ignores_messages_without_tool_calls():
 
 
 def test_debate_stops_at_two_speeches_per_round():
-    """max_debate_rounds=1 → 1 个来回 = Bull + Bear 各一次（count>=2 即收口）。"""
+    """max_debate_rounds=1 → 1 个来回 = Bear + Bull 各一次（count>=2 即收口）。
+
+    0.5.31：发言顺序改为**空方开场、多方收尾**（入口即 Bear，见 `setup.py`）。
+    """
     logic = ConditionalLogic(max_debate_rounds=1)
 
     assert logic.should_continue_debate(
-        {"investment_debate_state": {"count": 2, "current_response": "Bear: ..."}}
+        {"investment_debate_state": {"count": 2, "current_response": "Bull: ..."}}
     ) == "Research Manager"
     assert logic.should_continue_debate(
-        {"investment_debate_state": {"count": 1, "current_response": "Bull: ..."}}
-    ) == "Bear Researcher"
+        {"investment_debate_state": {"count": 1, "current_response": "Bear: ..."}}
+    ) == "Bull Researcher"
 
 
 def test_debate_second_round_alternates():
@@ -100,6 +103,30 @@ def test_debate_second_round_alternates():
     assert logic.should_continue_debate(
         {"investment_debate_state": {"count": 3, "current_response": "Bear: ..."}}
     ) == "Bull Researcher"
+
+
+def test_debate_order_opens_with_bear_and_bull_closes():
+    """0.5.31 不变量：发言序 Bear→Bull→Bear→Bull（**多方收尾**），来回数不变。
+
+    此前是多方开场、空方收尾，与偶数阈值（2×rounds）叠加后空方**永远拿到最后一句话**；
+    裁决策略由研究经理给出，而 LLM 对最后读到的论证存在 recency 偏置——实测
+    2026-09-21~09-24 的 24 票发言序恒为 Bull→Bear→Bull→Bear，终裁无一条 Buy/Overweight。
+    """
+    logic = ConditionalLogic(max_debate_rounds=2)
+    spoken = ["Bear"]                      # 入口即 Bear（setup.py: Quality Gate → Bear Researcher）
+    for _ in range(10):
+        nxt = logic.should_continue_debate(
+            {"investment_debate_state": {"count": len(spoken),
+                                         "current_response": f"{spoken[-1]}: ..."}}
+        )
+        if nxt == "Research Manager":
+            break
+        spoken.append(nxt.split()[0])
+    else:                                   # pragma: no cover - 防死循环
+        raise AssertionError(f"debate never converged: {spoken}")
+
+    assert spoken == ["Bear", "Bull", "Bear", "Bull"]     # 多方收尾
+    assert len(spoken) == 2 * logic.max_debate_rounds     # 来回数不变（2 个来回）
 
 
 def test_risk_discussion_stops_at_three_speeches_per_round():

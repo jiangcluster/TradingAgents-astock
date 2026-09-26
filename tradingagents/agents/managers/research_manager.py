@@ -39,7 +39,29 @@ Note: This is an A-share (China mainland) stock. Factor in regulatory policy imp
 
 Commit to a clear stance whenever the debate's strongest arguments warrant one; reserve Hold for situations where the evidence on both sides is genuinely balanced.
 
-**Data Quality Context** (weigh it when judging arguments; a claim built on a D/F report is weak evidence):
+**Rating Calibration** (rate the *balance of evidence*, not the amount of known risk):
+- Weigh the decision-relevant dimensions: direction of earnings and cash flow, valuation versus the actual
+  growth path, fund-flow / chip structure, verifiable catalysts with a dated path, and policy direction.
+- **Hold is a verdict, not a default.** "A good company but not a perfect entry" or "risks exist" are NOT
+  sufficient grounds for Hold or Underweight.
+- **Execution constraints are not case-specific evidence.** T+1 settlement, daily price limits and lot/board
+  rules apply identically to every A-share name; they constrain HOW a position is sized and entered, and must
+  NOT by themselves move the rating down. If the bear case rests mainly on them, or mainly on "the price has
+  already run up", while the bull case prevails on the decision-relevant dimensions, you MUST rate **Buy** or
+  **Overweight** — Overweight when 1-2 material risks remain unresolved, Buy when the evidence is decisive
+  and valuation is not clearly stretched.
+- **Mandatory negative trigger** (symmetric): if the bear case prevails on those dimensions while the bull
+  case rests mainly on theme / narrative extrapolation without a verifiable earnings or cash-flow path, or on
+  sentiment or momentum alone, you MUST rate **Underweight** or **Sell**.
+- **Missing or low-quality data is an uncertainty to disclose — it is neither a bearish nor a bullish
+  argument.** Do not let a D/F grade strip the bull's evidence while leaving the bear's case intact: judge
+  whichever side still has usable evidence, and say which claims became unverifiable.
+- **The last speaker is not automatically the stronger side** — weigh the arguments themselves, not the order
+  in which they were delivered.
+- State explicitly which single piece of evidence would flip your rating.
+
+**Data Quality Context** (weigh it when judging arguments; a claim built on a D/F report is weak evidence —
+but missing data is not evidence *for* the other side either):
 {quality if quality else "（本次无数据质量门控结论）"}
 
 ---

@@ -83,11 +83,18 @@ class ConditionalLogic:
         return self._route_after_analyst(state, "tools_lockup", "Msg Clear Lockup")
 
     def should_continue_debate(self, state: AgentState) -> str:
-        """Determine if debate should continue."""
+        """Determine if debate should continue.
 
+        **发言顺序：空方开场、多方收尾（0.5.31 起）**。此前是多方开场、**空方收尾**，
+        与 `max_debate_rounds` 的偶数阈值（2×）叠加后，空方**永远拿到最后一句话**；
+        而裁决策略由研究经理给出，LLM 对"最后读到的论证"存在 recency 偏置——
+        实测 2026-09-21~09-24 的 24 票发言序恒为 Bull→Bear→Bull→Bear，末句常是
+        决定性修辞（"投资最贵的不是错过，而是接一把正在下跌的飞刀"），24 票终裁
+        无一条 Buy/Overweight。改为 Bear→Bull→Bear→Bull：来回数不变（仍 2×rounds），
+        仅把最后发言权交给多方。
+        """
         # count 每次发言 +1。max_debate_rounds 的语义是"多空来回数"：一个来回 =
-        # 2 次发言（Bull + Bear），故阈值为 2×。原注释写"3 rounds of back-and-forth"
-        # 是上游 max_*=3 时代留下的，与当前配置语义不符（配置 1 → 实际 1 个来回）。
+        # 2 次发言（Bull + Bear），故阈值为 2×。
         if state["investment_debate_state"]["count"] >= 2 * self.max_debate_rounds:
             return "Research Manager"
         if state["investment_debate_state"]["current_response"].startswith("Bull"):

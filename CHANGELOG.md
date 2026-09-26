@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.32] — 2026-09-26
+
+### Changed（去偏上移：研究经理校准 + 辩论改「空方开场、多方收尾」）
+
+**动因**：v0.5.24 已对**下游**（风控三分析师 + 投组经理）做过"结构性约束不得吞掉买入评级"的
+校准，并按当时**预设的判据**验证：判据写明"三只仍全部 Hold/Underweight → **未生效**，需评估
+仲裁层"。2026-09-18~09-24 的 27 条结论仍是 **Buy/Overweight = 0** ⇒ 按该判据判定**未生效**，
+故本次把校准上移到**评级实际定型的那一级**。
+
+**证据（2026-09-21~09-24，24 份终裁原始产出，非推断）**：
+
+- 评级**不是 PM 定的**：研究经理 **20/24 直接给 Underweight**（另 3 Sell、1 Hold），
+  投组经理 **23/24 与其一致** —— 终裁只是追认，瓶颈在「辩论 → 研究经理」这一段；
+- 投资辩论发言序实测恒为 `Bull → Bear → Bull → Bear`（阈值 `2 × max_debate_rounds` 的偶数
+  特性）⇒ **空方永远拿到最后一句话**，且末句常是决定性修辞（"投资最贵的不是错过，而是接一把
+  正在下跌的飞刀"）；风控辩论三方顺序均衡（中性收尾），问题只在投资辩论；
+- `bear_researcher` 的 **"T+1 Trap" 仍是个案风险**条目（同一措辞在 `conservative_debator`
+  已于 v0.5.24 被限定为"只约束 HOW、不决定 WHETHER"），而 `research_manager` 提示词
+  **没有任何对称校准**（无"执行约束非个案证据"、无"缺失数据不得移动评级"、无"Hold 非默认"）；
+- 本周数据缺失（资金流/龙虎榜/北向）**单向削弱多方**：多方框架 5 条中 4 条依赖这些数据，
+  空方的 T+1 无需任何数据即恒成立；质量门复审词当时唯一的提示是"提醒辩论阶段谨慎使用该报告"
+  ⇒ 读起来等价于「缺失 = 看空」。
+
+**改动（提示词与路由，无风控口径放宽、无接口/数据变化）**：
+
+1. `agents/managers/research_manager.py`：新增 **Rating Calibration**（与 PM 同源）——
+   执行约束（T+1／涨跌停／手数板块规则）对每只 A 股都一样、**不得仅因其下调评级**；
+   "已经涨过"不足以否决；**对称的强制正向/负向触发**；**Hold 是结论不是默认值**；
+   **缺失数据既不支持看多也不支持看空**（并明确"不得让 D/F 抽掉多方证据而保留空方论据"）；
+   提醒"最后发言者不代表更强"；须写明哪一条证据会翻转评级。
+2. `agents/researchers/bear_researcher.py`：T+1 Trap 加限定语（只约束 HOW，不决定 WHETHER）。
+3. `graph/setup.py` + `graph/conditional_logic.py`：辩论改为**空方开场、多方收尾**
+   （`Bear → Bull → Bear → Bull`，来回数不变）；`cli/main.py` 进度提示同步。
+4. `agents/quality_gate.py`：复审提示与"复审不可用"文案改为**方向中性**——缺失项不得作为任何
+   方向的证据（既不能当"没有风险"，也不能据此推出看空结论）。
+
+**验证判据（先写定，用 `--codes` 同批复盘 A/B）**：
+
+- **生效**：出现 Hold/Overweight（或 Buy），且论证仍以个股证据为主（非"因为缺数据所以看多"）；
+- **未生效**：分布不变 → 需评估深研侧仲裁（B 方案）；
+- **过度校正**：追高型标的普遍出 Buy/Overweight 且理由空洞 → 回退第 1、3 项改动。
+
+- 测试同步：`tests/test_graph_flows.py`（新增发言序不变量 1 例、更新阈值用例 2 处）、
+  `tests/test_quality_gate.py`（新增方向中性用例 2 例）。
+
 ## [0.5.31] — 2026-09-26
 
 ### Fixed（龙虎榜：取数失败不再是"近30日未上龙虎榜"）

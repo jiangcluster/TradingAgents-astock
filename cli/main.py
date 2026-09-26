@@ -895,9 +895,10 @@ def update_analyst_statuses(message_buffer, chunk):
             message_buffer.update_agent_status(agent_name, "pending")
 
     # When all analysts complete, transition research team to in_progress
+    # （0.5.31：辩论由空方开场 → 进度条先亮 Bear Researcher）
     if not found_active and selected:
-        if message_buffer.agent_status.get("Bull Researcher") == "pending":
-            message_buffer.update_agent_status("Bull Researcher", "in_progress")
+        if message_buffer.agent_status.get("Bear Researcher") == "pending":
+            message_buffer.update_agent_status("Bear Researcher", "in_progress")
 
 def extract_content_string(content):
     """Extract string content from various message formats.

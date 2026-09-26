@@ -246,3 +246,32 @@ def test_review_prompt_defaults_to_all_analysts():
     prompt = qg._build_review_prompt(reports, "2026-09-19", "600519")
 
     assert "本次实际运行的 7 位分析师" in prompt
+
+
+# ---------------------------------------------------------------------------
+# 0.5.31：数据缺失的措辞必须**方向中性**（缺失 ≠ 看空）
+# ---------------------------------------------------------------------------
+def test_review_prompt_states_missing_data_is_direction_neutral():
+    """复审提示语不得只提醒"谨慎使用"——那等于把"缺数据"读成看空证据。
+
+    实测背景（2026-09-21~09-24）：资金流/龙虎榜/北向大面积缺失，而**多方框架**
+    （北向流入、游资接力、量价资金）恰好依赖这些数据；此时任何"单向提示"都会
+    让天平倒向空方（该窗口 24 票终裁无一条 Buy/Overweight）。
+    """
+    reports = {field: "（未运行）" for field in qg.REPORT_FIELDS.values()}
+
+    prompt = qg._build_review_prompt(reports, "2026-09-19", "600519")
+
+    assert "不得**作为任何方向的证据" in prompt
+    assert "也不能据此推出看空结论" in prompt
+
+
+def test_skip_review_note_states_missing_data_is_direction_neutral():
+    llm = FakeLLM()
+    node = qg.create_quality_gate(llm)
+
+    out = node(_state(selected_analysts=["market", "social", "news"]))["data_quality_summary"]
+
+    assert not llm.prompts, "过半报告未通过硬检查时不应再调用 LLM"
+    assert "不得**据「缺数据」推出看空结论" in out
+    assert "不要把「缺数据」当作「没有风险」" in out   # 两个方向都要堵
