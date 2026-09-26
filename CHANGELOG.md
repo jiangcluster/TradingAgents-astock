@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.31] — 2026-09-26
+
+### Fixed（龙虎榜：取数失败不再是"近30日未上龙虎榜"）
+
+**动因（下游周报审查，2026-09-24 实况）**：同一只票的资金面报告里同时出现
+「龙虎榜无当日数据（连接故障）」与「近30日未上龙虎榜」——两句话互相矛盾，而后者会被
+辩论环节当作**证据**使用（"未上榜 = 无游资打板 = 抛压结构干净"）。根因：`_eastmoney_datacenter`
+把「服务端异常/风控返回错误 JSON（顶层 `result` 缺失）」与「该期确实无数据（`result` 存在、
+`data` 为空）」折叠成同一个 `[]`。
+
+- 新增 `_eastmoney_datacenter_checked(...) -> (rows, ok)`：`ok=False` **仅**表示响应缺 `result`；
+  `_eastmoney_datacenter` 保留为薄包装（返回 `rows`，既有调用方行为不变）。
+- `get_dragon_tiger_board`：取数失败输出 `[数据缺失: 龙虎榜] 取数失败（…）` +
+  「**无法判断**近 N 日是否上榜——**不要**读作「未上龙虎榜」」；连接异常输出
+  `[数据缺失: 龙虎榜] 查询失败（…）`；只有 `ok=True` 且 `data` 为空才输出「近 N 日未上龙虎榜。」。
+- 同一函数：上榜原因字段改为 `EXPLAIN or EXPLANATION`（**线上字段名是 `EXPLAIN`**，
+  只读旧名会让"上榜原因"整列为空；实测 2026-09-24 `RPT_DAILYBILLBOARD_DETAILSNEW` 响应
+  同时含 `BILLBOARD_BUY_AMT` / `BILLBOARD_SELL_AMT` / `BILLBOARD_NET_AMT` / `EXPLAIN`）。
+
+- **「合法空」也不是故障**：东财对"该查询确实没有数据"的正式应答是
+  `{"result": null, "success": false, "code": 9201, "message": "返回数据为空"}`（实测：非交易日、
+  个股近 30 日无上榜均为此形态）→ `_eastmoney_datacenter_checked` 对 `code=9201`/`返回数据为空`
+  返回 `([], True)`（合法空），只有其余缺 `result`（服务端异常/风控/`code=9501` filter 被拒）
+  才返回 `ok=False`。**两个方向都要防**：把故障读成"确实没有"会写出"未上龙虎榜"的结论式误判；
+  把"确实没有"读成故障则会让正常无上榜的票显示"数据缺失/无法判断"。
+- 测试同步：`tests/test_astock_datasrc_fixes.py` 新增 7 例（`checked` 四态 + 旧入口兼容、
+  取数失败/连接异常/合法空 三态文案、`EXPLAIN` 字段解析）；全量 **587 passed, 13 skipped**
+  （skip 为可选依赖 `claude-agent-sdk` 缺失，非本次变更）。
+
 ## [0.5.30] — 2026-09-23
 
 ### Added（交付格式约束：禁止"草稿式推理"进报告）

@@ -819,23 +819,48 @@ def _patch_datacenter(monkeypatch, payload, raises=None):
 
 
 def test_datacenter_checked_distinguishes_missing_result(monkeypatch):
-    """`result` 缺失（服务端异常/风控）与 `data` 为空（该期无数据）必须可区分。"""
-    _patch_datacenter(monkeypatch, {"result": None, "success": False, "code": 9201})
+    """`result` 缺失要分两态：**合法空**（`code=9201`/「返回数据为空」）vs 真故障。
+
+    东财对"该查询确实没有数据"（非交易日、个股近 30 日无上榜）的正式应答就是
+    `result: null + code 9201`——把它当故障会让报告写"取数失败/无法判断"，
+    而把真故障当合法空则会写出"近30日未上龙虎榜"这种结论式误判。两者都必须可区分。
+    """
+    # ① 合法空：code 9201
+    _patch_datacenter(monkeypatch, {"result": None, "success": False, "code": 9201,
+                                    "message": "返回数据为空"})
+    rows, ok = a_stock._eastmoney_datacenter_checked("RPT_DAILYBILLBOARD_DETAILSNEW")
+    assert rows == [] and ok is True
+    # ② 合法空：message 含「返回数据为空」（无 code 时也要认）
+    _patch_datacenter(monkeypatch, {"result": None, "message": "返回数据为空"})
+    assert a_stock._eastmoney_datacenter_checked("RPT_DAILYBILLBOARD_DETAILSNEW")[1] is True
+    # ③ filter 被拒（9501）→ 真故障
+    _patch_datacenter(monkeypatch, {"result": None, "success": False, "code": 9501,
+                                    "message": "filter字段中日期参数格式错误"})
     rows, ok = a_stock._eastmoney_datacenter_checked("RPT_DAILYBILLBOARD_DETAILSNEW")
     assert rows == [] and ok is False
-    # 旧入口保持原语义（不可用 → []），其余调用方行为不变
-    assert a_stock._eastmoney_datacenter("RPT_DAILYBILLBOARD_DETAILSNEW") == []
-
+    # ④ result 存在但 data 为空 → 合法空
     _patch_datacenter(monkeypatch, {"result": {"data": []}, "success": True})
     rows, ok = a_stock._eastmoney_datacenter_checked("RPT_DAILYBILLBOARD_DETAILSNEW")
     assert rows == [] and ok is True
+    # ⑤ 旧入口保持原语义（不可用 → []），其余调用方行为不变
+    _patch_datacenter(monkeypatch, {"result": None, "code": 9501})
+    assert a_stock._eastmoney_datacenter("RPT_DAILYBILLBOARD_DETAILSNEW") == []
 
 
 def test_dragon_tiger_fetch_failure_is_reported_as_data_missing(monkeypatch):
-    _patch_datacenter(monkeypatch, {"result": None, "success": False})
+    _patch_datacenter(monkeypatch, {"result": None, "success": False, "code": 9501})
     out = a_stock.get_dragon_tiger_board("000981", "2026-09-24")
     assert "[数据缺失: 龙虎榜] 取数失败" in out
     assert "近30日未上龙虎榜。" not in out      # 不得给出"结论式"的未上榜断言
+
+
+def test_dragon_tiger_legit_empty_9201_is_no_listing(monkeypatch):
+    """东财「返回数据为空」(9201) = 该股近 30 日确实未上榜 → 正常输出，不报数据缺失。"""
+    _patch_datacenter(monkeypatch, {"result": None, "success": False, "code": 9201,
+                                    "message": "返回数据为空"})
+    out = a_stock.get_dragon_tiger_board("000498", "2026-09-24")
+    assert "近30日未上龙虎榜。" in out
+    assert "数据缺失" not in out
 
 
 def test_dragon_tiger_empty_result_is_no_listing(monkeypatch):

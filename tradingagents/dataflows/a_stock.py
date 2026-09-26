@@ -764,10 +764,19 @@ def _eastmoney_datacenter_checked(
     }
     r = _em_get(_DATACENTER_URL, params=params, timeout=15)
     d = r.json()
-    if not isinstance(d, dict) or not d.get("result"):
-        return [], False
-    rows = d["result"].get("data")
-    return (list(rows) if rows else []), True
+    if isinstance(d, dict) and d.get("result"):
+        rows = d["result"].get("data")
+        return (list(rows) if rows else []), True
+    # **合法空**（0.5.31）：东财对「该查询确实没有数据」的正式应答是
+    # `{"result": null, "success": false, "code": 9201, "message": "返回数据为空"}`
+    # （实测：非交易日、个股近 30 日无上榜、北向某期无持股均为此形态）——它不是故障，
+    # 必须与"服务端异常/风控/ filter 被拒"分开，否则会出现两个方向的误判：
+    # 把故障读成"确实没有"，或把"确实没有"读成"取数失败"。
+    code = str((d or {}).get("code") or "") if isinstance(d, dict) else ""
+    message = str((d or {}).get("message") or "") if isinstance(d, dict) else ""
+    if code == "9201" or "返回数据为空" in message:
+        return [], True
+    return [], False
 
 
 def _eastmoney_datacenter(
@@ -3121,8 +3130,9 @@ def get_dragon_tiger_board(
             # 0.5.31：取数失败**不得**写成"未上龙虎榜"——那句话在研报里会被当作
             # "没有游资参与/抛压干净"的证据（模型无法分辨"缺数据"与"事实为无"）。
             lines.append(
-                f"\n[数据缺失: 龙虎榜] 取数失败（东财 datacenter 响应缺 `result`：服务端异常或风控），"
-                f"**无法判断**近 {look_back_days} 日是否上榜——**不要**读作「未上龙虎榜」。"
+                f"\n[数据缺失: 龙虎榜] 取数失败（东财 datacenter 未返回 result：服务端异常/风控，"
+                f"或 filter 被拒），**无法判断**近 {look_back_days} 日是否上榜——"
+                f"**不要**读作「未上龙虎榜」。"
             )
         elif not data:
             lines.append(f"\n近{look_back_days}日未上龙虎榜。")
