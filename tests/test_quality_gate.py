@@ -92,6 +92,43 @@ FULL_REPORT = (
 )
 
 
+# ---------------------------------------------------------------------------
+# 0.5.37：取数失败文案纳入 A/B/C 降级判据（此前只服务 D 判据）
+# ---------------------------------------------------------------------------
+_LONG_BODY = "正文内容。" * 200 + "\n\n| 指标 | 值 |\n| --- | --- |\n| PE | 20 |\n"
+
+
+def test_long_report_with_one_failure_falls_to_b():
+    """长报告里夹带一处取数失败 → 至少 B（此前照样判 A，称"完整"与事实不符）。"""
+    grade, detail = qg._hard_check_report(
+        "news", _LONG_BODY + "\nNo hot stocks data for 2026-09-24\n")
+    assert grade == "B", detail
+    assert "取数失败文案" in detail
+
+
+def test_long_report_with_three_failures_falls_to_c():
+    text = _LONG_BODY + "\n" + "\n".join([
+        "No hot stocks data for 2026-09-24",
+        "同花顺 API error: timeout",
+        "No news found for A-stock '600519'",
+    ])
+    grade, detail = qg._hard_check_report("news", text)
+    assert grade == "C", detail
+
+
+def test_clean_long_report_still_gets_a():
+    """防过矫：无失败文案的完整报告仍是 A。"""
+    grade, _ = qg._hard_check_report("news", _LONG_BODY)
+    assert grade == "A"
+
+
+def test_failure_downgrade_does_not_enter_hard_fail_count():
+    """关键边界：B/C **不得**计入 `fail_count`（否则会误触发"跳过 LLM 复审"）。"""
+    grade, _ = qg._hard_check_report(
+        "news", _LONG_BODY + "\nNo hot stocks data for 2026-09-24\n")
+    assert grade not in ("F", "D")
+
+
 class FakeLLM:
     def __init__(self, content="## 数据质量审核报告\n**整体评级**: A", error=None):
         self.content = content

@@ -678,3 +678,104 @@ def test_northbound_snapshot_merges_instead_of_overwriting(monkeypatch, tmp_path
     body = cache.read_text(encoding="utf-8")
     assert "2026-05-01" in body and "2026-05-02" in body
     assert not os.path.exists(str(cache) + ".lock")
+
+
+# ---------------------------------------------------------------------------
+# 0.5.37：K 线 `end_date` 的**硬截断**（LLM 可控的窗口不得越过分析日）
+# ---------------------------------------------------------------------------
+
+
+def _kline_df(rows):
+    import pandas as pd
+
+    return pd.DataFrame({
+        "Date": pd.to_datetime([r[0] for r in rows]),
+        "Open": [r[1] for r in rows],
+        "High": [r[2] for r in rows],
+        "Low": [r[3] for r in rows],
+        "Close": [r[4] for r in rows],
+        "Volume": [r[5] for r in rows],
+    })
+
+
+_ROWS_WITH_FUTURE = [
+    ("2026-09-23", 10.0, 11.0, 9.5, 10.5, 100.0),
+    ("2026-09-24", 10.5, 11.5, 10.0, 11.0, 120.0),
+    ("2099-01-01", 99.0, 99.0, 99.0, 99.0, 1.0),   # 未来 bar：不得进报告
+]
+
+
+def test_stock_data_clamps_future_end_date_to_analysis_date(monkeypatch):
+    from tradingagents.dataflows.lookahead import set_analysis_date
+
+    monkeypatch.setattr(a_stock, "_mootdx_call",
+                        lambda *a, **k: _kline_df(_ROWS_WITH_FUTURE))
+    set_analysis_date("2026-09-24")
+    try:
+        out = a_stock.get_stock_data("600519", "2026-09-01", "2099-01-01")
+    finally:
+        set_analysis_date(None)
+
+    assert "look-ahead guard" in out, "钳制必须**显式可见**（模型要知道窗口被截断）"
+    assert "2099-01-01" in out, "提示行应回显被钳制的原请求日期（便于模型理解）"
+    assert "2099-01-01,99.0" not in out, "未来 bar 的数据行仍进了报告"
+    assert "2026-09-24" in out
+    assert "# Total records: 2" in out
+
+
+def test_stock_data_without_injected_date_is_untouched(monkeypatch):
+    """未注入分析日 → **不干预**（离线调用/单测行为不变，避免静默改变既有契约）。"""
+    monkeypatch.setattr(a_stock, "_mootdx_call",
+                        lambda *a, **k: _kline_df(_ROWS_WITH_FUTURE))
+
+    out = a_stock.get_stock_data("600519", "2026-09-01", "2099-01-01")
+
+    assert "look-ahead guard" not in out
+    assert "2099-01-01,99.0" in out, "未注入时不得改变既有行为"
+
+
+@pytest.mark.parametrize("analysis,end_date,exp_end,expect_note", [
+    ("2026-09-24", "2099-01-01", "2026-09-24", True),    # 越过分析日 → 钳制 + 提示
+    ("2026-09-24", "2026-09-24", "2026-09-24", False),   # 恰等于分析日 → 不动
+    ("2026-09-24", "2026-09-01", "2026-09-01", False),   # 早于分析日 → 不动
+    (None, "2099-01-01", "2099-01-01", False),           # 未注入 → 不干预
+    ("2026-09-24", "", "", False),                       # 缺 end_date → 原样返回
+])
+def test_clamp_end_date_tri_state(analysis, end_date, exp_end, expect_note):
+    from tradingagents.dataflows.lookahead import clamp_end_date, set_analysis_date
+
+    set_analysis_date(analysis)
+    try:
+        got_end, note = clamp_end_date(end_date)
+    finally:
+        set_analysis_date(None)
+
+    assert got_end == exp_end
+    assert bool(note) is expect_note
+
+
+def test_run_graph_injects_and_clears_analysis_date(monkeypatch):
+    """端到端注入点：图运行期为分析日，`finally` 清除（同进程连续跑多票不串味）。"""
+    from tradingagents.dataflows.lookahead import get_analysis_date
+    from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+    g = object.__new__(TradingAgentsGraph)      # 跳过重构造，只验证注入边界
+    g.debug = False
+    g.callbacks = []
+    seen = {}
+
+    monkeypatch.setattr(g, "prepare_graph_run", lambda *a, **k: ({}, {}, None))
+
+    class _FakeGraph:
+        def invoke(self, state, **kw):
+            seen["during"] = get_analysis_date()
+            return {"messages": []}
+
+    g.graph = _FakeGraph()
+    monkeypatch.setattr(g, "finalize_graph_run", lambda *a, **k: "Hold")
+    monkeypatch.setattr(g, "close_graph_run", lambda: None)
+
+    g._run_graph("600519", "2026-09-24")
+
+    assert seen["during"] == "2026-09-24"
+    assert get_analysis_date() is None, "finally 未清除 → 同进程后续调用会被污染"

@@ -35,6 +35,7 @@ import pandas as pd
 import requests as _requests
 
 from .utils import safe_ticker_component
+from .lookahead import clamp_end_date
 from tradingagents.utils import atomic_io
 
 logger = logging.getLogger(__name__)
@@ -1326,6 +1327,12 @@ def get_stock_data(
     """Get OHLCV stock price data via mootdx."""
     code = _normalize_ticker(symbol)
 
+    # 0.5.37：先把 end_date 钳到**分析日**以内（在任何取数/降级/补充/过滤之前）——
+    # `start_date`/`end_date` 由 LLM 填写，此前被当作权威边界，模型给出分析日之后的日期
+    # 即可把未来 K 线喂进报告。分析日由图运行层注入（`dataflows/lookahead.py`）；
+    # 未注入则不干预（离线调用 / 单测行为不变），钳制时输出头部显式提示。
+    end_date, _clamp_note = clamp_end_date(end_date)
+
     data_source = "mootdx (TCP)"
     try:
         df = _mootdx_call("bars", symbol=code, category=4, offset=800)
@@ -1398,7 +1405,7 @@ def get_stock_data(
         index=False
     )
 
-    header = f"# Stock data for {code} (A-stock) from {start_date} to {end_date}\n"
+    header = _clamp_note + f"# Stock data for {code} (A-stock) from {start_date} to {end_date}\n"
     header += f"# Total records: {len(df)}\n"
     header += f"# Data source: {data_source}\n"
     header += (

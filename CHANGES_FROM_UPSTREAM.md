@@ -400,6 +400,28 @@ eastmoney 全系北向资金接口（含 akshare `stock_hsgt_hist_em`、datacent
 15. **`get_hot_stocks` 的 `""` = 市场今天语义保持不变**：有测试锁定且属"故意取当天"，
     本批不动（避免为一致性引入行为变化）。
 
+### 第二批（0.5.37）：K 线 `end_date` 硬截断 + 门控降级判据
+
+| 文件 | 改动 |
+|------|------|
+| `tradingagents/dataflows/lookahead.py` | **新增**：分析日注入（ContextVar）+ `clamp_end_date()` —— 注入方与消费方解耦的单一事实源 |
+| `tradingagents/dataflows/a_stock.py` | `get_stock_data` 在任何取数/降级/补充/过滤**之前**把 `end_date` 钳到分析日，并在输出头部显式提示 |
+| `tradingagents/graph/trading_graph.py` | `_run_graph` 注入分析日（`finally` 清除） |
+| `tradingagents/agents/quality_gate.py` | 取数失败文案纳入 A/B/C 降级判据（≥3 → C，>0 → B） |
+| `tests/test_lookahead_guard.py` / `tests/test_quality_gate.py` | 对应新增用例 |
+
+设计决策：
+
+16. **K 线 `end_date` 必须硬截断，且截断要"可见"**：`end_date` 由 LLM 填写，此前被当权威右边界
+    —— 模型给出分析日之后的日期即可把未来 K 线喂进报告。改为：图运行期注入分析日（ContextVar）、
+    数据层 `min(end_date, 分析日)`，并在输出头部回显 `requested … clamped to …`，
+    使模型知道窗口被截断，而不是误以为覆盖到请求日。**未注入 → 不干预**（既有离线行为不变）。
+17. **ContextVar 而非全局变量**：同进程多图/多线程互不污染，`finally` 清除不残留；
+    代价是依赖"工具在驱动上下文内执行"——已用最小 LangGraph + ToolNode 实验验证
+    （`CONTEXTVAR-OK`），并保留"未注入不钳制"作为降级路径。
+18. **失败文案纳入 A/B/C 判据，但不进 D/F 计数**：门控 `fail_count` 只统计 D/F（决定是否跳过
+    LLM 复审），故把 failure 计入 B/C 既让"长报告夹带取数失败"如实降级，又不会误触发"跳过复审"。
+
 ---
 
 ### 改动文件汇总（累计）

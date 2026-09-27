@@ -98,10 +98,16 @@ def _hard_check_report(analyst_type: str, report: str) -> tuple:
         issues.append("缺少汇总表格")
     if missing_count > 0:
         issues.append(f"{missing_count} 处数据缺失")
+    # 0.5.37：取数失败文案**同样计入降级判据**（此前只服务于上面的 D 判据）——
+    # "长报告里夹带一处取数失败"此前照样能判 A（称"完整"），与事实不符。
+    # 阈值与 missing_count 对齐（≥3 → C，>0 → B）；**不影响** LLM 复审的跳过判据：
+    # `_should_skip_review` 只统计 D/F（见 `quality_gate_node` 的 fail_count），B/C 不计入。
+    if failure_count > 0:
+        issues.append(f"{failure_count} 处取数失败文案")
 
-    if missing_count >= 3:
+    if missing_count >= 3 or failure_count >= 3:
         return ("C", "；".join(issues))
-    if not has_table or missing_count > 0:
+    if not has_table or missing_count > 0 or failure_count > 0:
         return ("B", "；".join(issues) if issues else "基本合格")
 
     return ("A", f"完整 ({length} chars)")

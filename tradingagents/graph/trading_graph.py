@@ -21,6 +21,7 @@ from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.agents.utils.memory import TradingMemoryLog
 from tradingagents.agents.utils.rating import SOURCE_FALLBACK
 from tradingagents.dataflows.utils import safe_ticker_component
+from tradingagents.dataflows.lookahead import set_analysis_date
 from tradingagents.agents.utils.agent_states import (
     AgentState,
     InvestDebateState,
@@ -785,6 +786,11 @@ class TradingAgentsGraph:
             company_name, trade_date, callbacks=self.callbacks
         )
 
+        # 0.5.37：把**分析日**注入数据层（ContextVar），使数据层能硬钳制 LLM 填写的
+        # K 线 `end_date`（前视守卫：模型给分析日之后的日期时，未来 K 线不得进报告）。
+        # 用 ContextVar 而非全局变量：并发/多图互不污染；`finally` 清除，不在进程内残留
+        # （同进程连续跑多票时不会串味）。未注入时数据层不干预（离线调用行为不变）。
+        set_analysis_date(trade_date)
         try:
             if self.debug:
                 trace = []
@@ -801,6 +807,7 @@ class TradingAgentsGraph:
             signal = self.finalize_graph_run(company_name, trade_date, final_state)
             return final_state, signal
         finally:
+            set_analysis_date(None)
             self.close_graph_run()
 
     def _log_state(self, trade_date, final_state):

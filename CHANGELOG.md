@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.37] — 2026-09-27
+
+### Fixed（批次 C 第二批：K 线 `end_date` 硬截断 + 门控降级判据）
+
+1. **K 线窗口前视（硬截断）**：`get_stock_data` 的 `start_date` / `end_date` 全由 LLM 填写，
+   数据层此前当作权威边界 —— 模型给出分析日之后的日期即可把**未来 K 线**喂进报告。
+   - 新增 `tradingagents/dataflows/lookahead.py`：分析日注入的**单一事实源**
+     （`set_analysis_date` / `get_analysis_date` / `clamp_end_date`，基于 ContextVar），
+     注入方（图运行层）与消费方（数据层）解耦，避免图运行层反向依赖具体 vendor；
+   - `graph/trading_graph._run_graph` 在 `graph.invoke` 前注入**分析日**、`finally` 清除；
+   - `get_stock_data` 在任何取数/降级/补充/过滤**之前**把 `end_date` 钳到分析日，并在输出头部
+     回显 `# NOTE: requested end_date … clamped to analysis date … (look-ahead guard)`
+     —— 让模型知道窗口被截断，而不是误以为覆盖到请求日；
+   - **未注入分析日 → 不干预**（离线调用 / 单测行为不变，不引入静默行为变化）；
+   - 设计验证：用最小 LangGraph + ToolNode 实验确认 ContextVar 在工具函数内**可见**
+     （`CONTEXTVAR-OK`），避免"以为修了、实际静默失效"。
+2. **门控取数失败文案纳入降级判据**：`_hard_check_report` 此前把 `failure_count` 只用于 D 判据，
+   于是"长报告里夹带一处取数失败"照样判 **A**（称"完整"）。现 ≥3 处 → C、>0 → B；
+   **不影响** LLM 复审的跳过判据（`fail_count` 只统计 D/F）。
+
+- 测试：新增 K 线钳制用例（含"未注入不干预"回归）+ 门控降级用例（含"不进 D/F 计数"边界）；
+  本机全量 **632 passed / 13 skipped**（两个 cli 测试因本机缺 `prompt_toolkit` 未收集，与本次无关）。
+- 版本号五处同步（0.5.36 → 0.5.37）：`pyproject.toml` / 本文件 / `CLAUDE.md` /
+  `tradingagents/__init__.py` / `cli/headless.py` docstring。
+
 ## [0.5.36] — 2026-09-27
 
 ### Fixed（批次 C 低风险 3 条：缺日期守卫静默 / 门控词表漏检 / 评级来源边界）
