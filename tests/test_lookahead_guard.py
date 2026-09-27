@@ -142,6 +142,19 @@ def test_fundamentals_silent_for_today(monkeypatch):
     assert "未来函数警告" not in out
 
 
+def test_fundamentals_flags_missing_curr_date(monkeypatch):
+    """0.5.36：缺 curr_date 时快照守卫此前**完全静默**（`_is_historical(None)` 为假），
+    与三表（都带 `_missing_curr_date_notice`）不一致 —— 报告必须能看到"截断失效"。"""
+    monkeypatch.setattr(a_stock, "_tencent_quote", lambda codes: {})
+    monkeypatch.setattr(a_stock, "_mootdx_call", lambda *a, **k: None)
+    monkeypatch.setattr(a_stock, "_em_get", lambda *a, **k: FakeResp({}))
+
+    out = a_stock.get_fundamentals("600519")
+
+    assert "未提供分析日期" in out
+    assert "未来函数警告" not in out          # 缺日期与历史日是两种不同告警，不得混用
+
+
 def test_profit_forecast_warns_on_historical_date(monkeypatch):
     import pandas as pd
 
@@ -153,6 +166,21 @@ def test_profit_forecast_warns_on_historical_date(monkeypatch):
     out = a_stock.get_profit_forecast("600519", PAST)
 
     assert "未来函数警告" in out
+
+
+def test_profit_forecast_flags_missing_curr_date(monkeypatch):
+    """0.5.36：缺 curr_date 时一致预期的时点守卫此前静默（修复同 get_fundamentals）。"""
+    import pandas as pd
+
+    monkeypatch.setattr(
+        a_stock, "_ths_eps_forecast",
+        lambda code: pd.DataFrame({"年度": ["2026"], "预测每股收益": [1.23]}),
+    )
+
+    out = a_stock.get_profit_forecast("600519")
+
+    assert "未提供分析日期" in out
+    assert "未来函数警告" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -511,11 +539,16 @@ def test_concept_blocks_warns_on_historical_date(monkeypatch):
     assert "白酒" in out, "名单本身仍应保留（该拿的事实不能一起丢）"
 
 
-def test_concept_blocks_silent_for_today_and_for_missing_date(monkeypatch):
+def test_concept_blocks_silent_for_today_and_flags_missing_date(monkeypatch):
+    """今天 → 静默；**没传分析日 → 必须告警**（0.5.36：此前两者同形、都静默）。"""
     _patch_concept_blocks(monkeypatch)
 
     assert "未来函数警告" not in a_stock.get_concept_blocks("600519", TODAY)
-    assert "未来函数警告" not in a_stock.get_concept_blocks("600519")
+
+    missing = a_stock.get_concept_blocks("600519")
+    assert "未来函数警告" not in missing        # 缺日期 ≠ 历史日（两种告警文案不同）
+    assert "未提供分析日期" in missing          # 但"时点截断失效"必须可见（不再静默）
+    assert "白酒" in missing                    # 名单本身仍保留（该拿的事实不能一起丢）
 
 
 def test_lockup_history_excludes_unlocks_after_analysis_date(monkeypatch):

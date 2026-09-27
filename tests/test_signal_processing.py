@@ -65,6 +65,51 @@ class TestParseRatingWithSource:
 
 
 # ---------------------------------------------------------------------------
+# 0.5.36：图运行收尾的**返回值边界**——只返回裸字符串，会把"解析失败"当"真的 Hold"
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestFinalizeExposesSource:
+    """`finalize_graph_run_detail` 补来源；`finalize_graph_run` 契约保持不变。
+
+    背景：`finalize_graph_run` 返回裸字符串（为兼容既有调用方），而 `rating_source=fallback`
+    （终裁里一个评级词都没有）时返回值仍是默认的 `Hold` —— 只看返回值的调用方无法区分
+    "模型建议持有"与"评级没解析出来"。本方法让需要区分的调用方一次拿到 `(rating, source)`。
+    """
+
+    @staticmethod
+    def _graph():
+        from tradingagents.graph.trading_graph import TradingAgentsGraph
+        return object.__new__(TradingAgentsGraph)   # 跳过重构造：只验证返回边界
+
+    def test_detail_returns_rating_and_source(self, monkeypatch):
+        g = self._graph()
+        monkeypatch.setattr(g, "finalize_graph_run", lambda c, d, s: "Hold")
+
+        assert g.finalize_graph_run_detail(
+            "600519", "2026-09-24", {"rating_source": "fallback"}) == ("Hold", "fallback")
+        assert g.finalize_graph_run_detail(
+            "600519", "2026-09-24", {"rating_source": "label"}) == ("Hold", "label")
+
+    def test_detail_defaults_to_fallback_when_state_lacks_source(self, monkeypatch):
+        """state 缺 `rating_source`（旧 checkpoint / 手工构造）→ 保守按 fallback。"""
+        g = self._graph()
+        monkeypatch.setattr(g, "finalize_graph_run", lambda c, d, s: "Hold")
+
+        assert g.finalize_graph_run_detail("600519", "2026-09-24", {}) == ("Hold", "fallback")
+
+    def test_plain_finalize_signature_unchanged(self):
+        """既有契约不变：签名与返回值仍是裸字符串（CLI / headless / Web 依赖）。"""
+        import inspect
+
+        from tradingagents.graph.trading_graph import TradingAgentsGraph
+
+        sig = inspect.signature(TradingAgentsGraph.finalize_graph_run)
+        assert list(sig.parameters) == ["self", "company_name", "trade_date", "final_state"]
+
+
+# ---------------------------------------------------------------------------
 # Heuristic parser
 # ---------------------------------------------------------------------------
 

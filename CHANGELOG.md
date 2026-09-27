@@ -6,6 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.36] — 2026-09-27
+
+### Fixed（批次 C 低风险 3 条：缺日期守卫静默 / 门控词表漏检 / 评级来源边界）
+
+**动因**：2026-09-27 对 A 股 skill 体系的全面代码审查。本批**只取低风险 3 条**；
+高风险项（K 线 `end_date` 未与分析日取 min 的前视软守卫）**未动**，另行评估。
+
+1. **缺 `curr_date` 时守卫静默失效**（`dataflows/a_stock.py`）
+   - `get_fundamentals` / `get_profit_forecast`：`_is_historical(None)` 为假 → 既不告警也无提示，
+     与三表（都带 `_missing_curr_date_notice`）口径不一致 → 现补 `elif not curr_date: <告警>`。
+   - `get_concept_blocks`：签名默认值 `""` → `None`（`""` 同样让守卫静默），缺日期时输出显式告警
+     （板块**名单**是稳定事实仍保留，仅当日涨跌幅不可当分析日当日值）。
+   - `get_hot_stocks` 的 `""`=市场今天语义**保持不变**（有测试锁定，属"故意取当天"）。
+2. **门控失败词表漏检 + 守卫本身空转**（`agents/quality_gate.py` + `tests/test_quality_gate.py`）
+   - 实测提取数据层 28 条"失败语气"文案，其中 **9 条无任何 marker 命中**并已补入：
+     `No hot stocks data…` / `No data found…` / `No analyst coverage…` / `No news found for…` /
+     `No global news found…` / `No global news available…` / `同花顺 API error:` /
+     `Baidu PAE error:` / `未提供分析日期…`。
+   - **守卫判据重写**：原守卫只用两条窄正则（`return f"Error <v>` / `return f"No <x> data`），
+     **跨行拼接**（`return (\n f"…"`）与**中文前缀**文案全部漏检 → 词表补齐也无人守。
+     现判据与门控实现同构（"存在 marker 是该文案的子串"，对应 `m in report`），
+     另加"提取器不空转"守卫与 8 条点名文案参数化回归。
+3. **评级来源边界**（`graph/trading_graph.py`）：`finalize_graph_run` 返回裸字符串，
+   `rating_source=fallback` 时仍是默认 `Hold`，调用方无法区分"模型建议持有"与"没解析出来"。
+   新增 `finalize_graph_run_detail()` → `(rating, rating_source)`，并把评级写回
+   `final_state["rating"]`。**既有 `finalize_graph_run` 签名与返回值不变**（CLI/headless/Web 依赖）。
+
+**如实说明（已知边界，未做）**：
+- ⚠️ `_hard_check_report` 的 `failure_count` **只参与 D 判据**，故"长报告里夹带一行失败文案"
+  目前**不会被降级** —— 补词表的收益集中在 D 判据与下游 `data_health` 归因；
+  是否把 failure 计入 issues（至少降 B）属**行为变更**，待单独决策。
+- K 线 `get_stock_data` 的 `end_date` 仍由 LLM 控制、未与分析日取 min（前视软守卫），本批未改。
+
+- 测试：本机全量 **620 passed / 13 skipped**
+  （`test_cli_default_command.py` / `test_ticker_symbol_handling.py` 因本机缺 `prompt_toolkit`
+  未收集，**与本次改动无关**）；定向 `tests/test_astock_datasrc_fixes.py` 等 199 passed。
+- 版本号五处同步（0.5.35 → 0.5.36）：`pyproject.toml` / 本文件 / `CLAUDE.md` /
+  `tradingagents/__init__.py` / `cli/headless.py` docstring；并订正 `__init__.py` 里
+  "四处同步"的旧措辞（实际锁五处）。
+
 ## [0.5.35] — 2026-09-26
 
 ### Fixed（两处"缺失与正常同形"：用量统计未接线 / "今天"用错时区）

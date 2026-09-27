@@ -36,7 +36,14 @@ MIN_REPORT_LENGTH = 200
 # 与 `Error calculating …`（技术指标），以及 `No … data` 一族——此前词表只有 `Error fetching`，
 # 而"取数失败"文案里占多数的是 `Error retrieving`，等于门控看不出来。
 # 防漂移：`tests/test_quality_gate.py::test_failure_markers_cover_data_layer_failure_strings`
-# 会从 `a_stock.py` 源码提取这两族文案并断言词表覆盖（新增失败文案忘记同步即失败）。
+# 会从 `a_stock.py` 源码提取失败文案并断言词表覆盖（新增失败文案忘记同步即失败）。
+#
+# 0.5.36（批次 C）：补 9 条**实测提取**出的缺口文案——此前守卫只提取
+# `return f"Error <verb>` / `return f"No <x> data` 两种**单行**形态，而跨行拼接的
+# `return (\n f"…"`（`No hot stocks data…` / `No data found…` / `Baidu PAE error…`）
+# 与中文前缀的 `同花顺 API error:` **全部漏检** → 守卫形同空转。
+# 现判据改为**与门控实现完全一致**（"至少有一个 marker 是该文案的子串"，
+# 门控的实际判据就是 `m in report`），新增文案未同步词表即测试失败。
 FAILURE_MARKERS = [
     "无法获取",
     "获取失败",
@@ -54,6 +61,16 @@ FAILURE_MARKERS = [
     "No income statement data",
     "No insider/shareholder data",
     "No concept/block data",
+    # —— 0.5.36 补：实测提取出的 9 条缺口（见上方注释）——
+    "PAE error",                    # 百度股市通失败（Baidu PAE error: ResultCode=…）
+    "API error",                    # 同花顺失败（同花顺 API error: …）
+    "No analyst coverage",          # 一致预期无覆盖（No analyst coverage found for …）
+    "No data found",                # K 线兜底为空（No data found for A-stock …）
+    "No global news available",     # 全球新闻源覆盖不足
+    "No global news found",         # 全球新闻为空
+    "No hot stocks data",           # 游资/热门股为空
+    "No news found for",            # 个股新闻为空
+    "未提供分析日期",                # 缺 curr_date → 时点截断失效（_missing_curr_date_notice）
 ]
 
 

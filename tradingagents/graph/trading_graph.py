@@ -720,6 +720,10 @@ class TradingAgentsGraph:
         # 无法区分"模型建议持有"与"评级没解析出来、落到了默认值"。
         decision_text = final_state["final_trade_decision"]
         rating, rating_source = self.signal_processor.process_signal_detail(decision_text)
+        # 评级与来源**都**写回 state（0.5.36）：`finalize_graph_run` 的返回值是裸字符串，
+        # 调用方只看它无法区分"模型建议 Hold"与"评级没解析出来、落到默认 Hold"
+        # （后者 rating_source=fallback）——把评级也落 state，便于与来源一起取用。
+        final_state["rating"] = rating
         final_state["rating_source"] = rating_source
         if rating_source == SOURCE_FALLBACK:
             logger.warning(
@@ -748,6 +752,19 @@ class TradingAgentsGraph:
             )
 
         return rating
+
+    def finalize_graph_run_detail(self, company_name, trade_date, final_state) -> tuple:
+        """与 `finalize_graph_run` 同一实现，但**同时返回评级来源**（0.5.36）。
+
+        为什么需要：`finalize_graph_run` 返回裸字符串（为兼容既有调用方），而当
+        `rating_source == "fallback"`（终裁里一个评级词都没有）时返回值仍是默认的 `"Hold"`
+        —— 调用方只看返回值会把"解析失败"误当成"模型建议持有"。需要区分二者的调用方
+        （CLI / headless / Web / 下游深研）应改用本方法取 `(rating, rating_source)`。
+
+        **不改变既有行为**：`finalize_graph_run` 仍返回字符串，本方法只是在其之上补来源。
+        """
+        rating = self.finalize_graph_run(company_name, trade_date, final_state)
+        return rating, final_state.get("rating_source", SOURCE_FALLBACK)
 
     def close_graph_run(self) -> None:
         """Close the active checkpointer context, if any."""

@@ -19,26 +19,71 @@ from tradingagents.agents import quality_gate as qg
 _ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
-def test_failure_markers_cover_data_layer_failure_strings():
-    """词表必须覆盖数据层**实际**的失败文案（G14 / 0.5.28）。
+# 数据层失败文案的**语义对齐**守卫（0.5.36 重写）：
+# 判据与门控实现完全一致 —— 门控扫的是 `m in report`（子串命中），故守卫也断言
+# "每条失败文案至少被一个 marker 作为**子串**命中"。
+# 此前用两条窄正则提取（只认单行 `return f"Error <v>` / `return f"No <x> data`），
+# 跨行拼接（`return (\n f"…"`）与中文前缀的文案**全部漏检** —— 实测漏 9 条
+# （`No hot stocks data…` / `No data found…` / `Baidu PAE error…` / `同花顺 API error:` …），
+# 等于词表补齐了也无人守（0.5.28 立的守卫形同空转）。
+_RETURN_LITERAL_RE = re.compile(r'return\s*\(?\s*f?"((?:[^"\\]|\\.)*)"')
+_FAILURE_HINTS = ("error", "Error", "失败", "not found", "No ", "无法",
+                  "unavailable", "no data", "未提供")
 
-    此前词表只有 `Error fetching`，而 a_stock 的六处财报类失败返回的是
-    `Error retrieving …` → 门控认不出取数失败，可能把失败当合格数据给 A/B 级。
-    本用例直接从数据层源码提取两族文案并断言词表覆盖：**新增失败文案而忘了同步词表即失败**。
-    """
+
+def _data_layer_failure_literals():
+    """从数据层源码提取所有"失败语气"的 `return` 字符串字面量（插值归一为 `{}`）。"""
     src = (_ROOT / "tradingagents" / "dataflows" / "a_stock.py").read_text(encoding="utf-8")
-    # 只取 `return f"…"` 形态：门控扫的是**进报告的文本**；`raise ValueError("No OHLCV data…")`
-    # 这类内部异常消息由调用方转成"K线数据获取失败：…"（已由"获取失败"覆盖），不属词表范围。
-    verbs = sorted(set(re.findall(r'return f"Error (\w+)', src)))
-    assert verbs, "提取不到 `Error <verb>` 文案（守卫空转，检查数据层文案格式是否变化）"
-    markers = "\n".join(qg.FAILURE_MARKERS)
-    missing = [v for v in verbs if f"Error {v}" not in markers]
-    assert not missing, f"数据层失败文案未进 FAILURE_MARKERS：{[f'Error {v}' for v in missing]}"
+    out = set()
+    for lit in _RETURN_LITERAL_RE.findall(src):
+        flat = re.sub(r"\{[^}]*\}", "{}", lit)
+        if any(h in flat for h in _FAILURE_HINTS):
+            out.add(flat)
+    return out
 
-    no_data = sorted(set(re.findall(r'return f"No ([\w/\-]+) data', src)))
-    assert no_data, "提取不到 `No <x> data` 文案（守卫空转）"
-    missing_no = [n for n in no_data if f"No {n} data" not in markers]
-    assert not missing_no, f"数据层 No…data 文案未进 FAILURE_MARKERS：{[f'No {n} data' for n in missing_no]}"
+
+def test_guard_extractor_is_not_vacuous():
+    """守卫自身不得空转：必须连**跨行拼接**与**中文前缀**的文案都能提取到。"""
+    lits = _data_layer_failure_literals()
+    assert len(lits) >= 20, f"提取到的失败文案过少，守卫可能已失效：{sorted(lits)}"
+    joined = "\n".join(lits)
+    assert "No hot stocks data" in joined, "跨行拼接的失败文案未被提取（守卫空转）"
+    assert "API error" in joined, "中文前缀的失败文案未被提取（守卫空转）"
+
+
+def test_failure_markers_cover_data_layer_failure_strings():
+    """词表必须覆盖数据层**实际**的失败文案（0.5.28 立、0.5.36 改判据）。
+
+    未覆盖的后果：门控把"取数失败"当合格数据给 A/B 级 —— 长度兜底管不到"长报告里
+    夹带一行失败信息"的场景（该场景下 failure 计数只在 D 判据里起作用）。
+    判据 = `存在某个 marker 是该文案的子串`，与门控的 `m in report` 完全一致。
+    """
+    lits = _data_layer_failure_literals()
+    assert lits, "提取不到数据层失败文案（守卫空转，检查提取正则与文案形态）"
+    markers = qg.FAILURE_MARKERS
+    missing = sorted(lit for lit in lits if not any(m in lit for m in markers))
+    assert not missing, (
+        "以下数据层失败文案**没有任何 FAILURE_MARKERS 子串命中**（门控会把它们当合格数据）：\n  "
+        + "\n  ".join(missing)
+        + "\n修复：把对应子串加入 `quality_gate.FAILURE_MARKERS`。"
+    )
+
+
+@pytest.mark.parametrize("failure_text", [
+    "No hot stocks data for 2026-09-24 (may be non-trading day or data not yet available)",
+    "同花顺 API error: timeout",
+    "No analyst coverage found for A-stock '600519'",
+    "Baidu PAE error: ResultCode=1001 参数错误",
+    "No data found for A-stock '600519' between 2026-01-01 and 2026-09-24",
+    "No news found for A-stock '600519'",
+    "No global news found for 2026-09-24",
+    "⚠️ 未提供分析日期（curr_date）：无法剔除分析日之后才披露的报告期，",
+])
+def test_known_failure_texts_are_recognized(failure_text):
+    """0.5.36 补齐的 9 条缺口逐条回归：门控必须把它们认成失败。"""
+    report = "## 分析\n" + "正文内容。" * 200 + "\n\n" + failure_text + "\n"
+    assert any(m in report for m in qg.FAILURE_MARKERS), \
+        f"门控认不出该失败文案（会当合格数据处理）：{failure_text!r}"
 
 
 FULL_REPORT = (

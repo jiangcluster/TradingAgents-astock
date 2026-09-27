@@ -684,6 +684,9 @@ def _patch_baidu(monkeypatch, payload=None, exc=None):
     monkeypatch.setattr(a_stock, "_requests", type("R", (), {"get": staticmethod(fake_get)}))
 
 
+# 注（0.5.36）：以下 concept-blocks 用例**显式传「今天」的日期**——生产路径上工具层总会
+# 转发 `curr_date`（由 test_every_date_aware_tool_forwards_its_date 保证）；不传会命中
+# 数据层新增的「未提供分析日期」告警前缀，使"降级"断言被前缀干扰（与本组用例的被测逻辑无关）。
 def test_concept_blocks_falls_back_when_baidu_403(monkeypatch):
     """百度 403 返回非 JSON → r.json() 抛错 → 走东财降级。"""
     def fake_get(url, headers=None, timeout=None, **kw):
@@ -692,7 +695,7 @@ def test_concept_blocks_falls_back_when_baidu_403(monkeypatch):
     monkeypatch.setattr(a_stock._requests, "get", fake_get)
     monkeypatch.setattr(a_stock, "_em_concept_blocks", lambda code: "EM_FALLBACK_BODY")
 
-    assert a_stock.get_concept_blocks("603613") == "EM_FALLBACK_BODY"
+    assert a_stock.get_concept_blocks("603613", a_stock._market_today().isoformat()) == "EM_FALLBACK_BODY"
 
 
 def test_concept_blocks_falls_back_on_nonzero_resultcode(monkeypatch):
@@ -700,7 +703,7 @@ def test_concept_blocks_falls_back_on_nonzero_resultcode(monkeypatch):
                         lambda *a, **k: FakeResp({"ResultCode": "1", "ResultMsg": "blocked"}))
     monkeypatch.setattr(a_stock, "_em_concept_blocks", lambda code: "EM_FALLBACK_BODY")
 
-    assert a_stock.get_concept_blocks("603613") == "EM_FALLBACK_BODY"
+    assert a_stock.get_concept_blocks("603613", a_stock._market_today().isoformat()) == "EM_FALLBACK_BODY"
 
 
 def test_concept_blocks_falls_back_when_baidu_empty(monkeypatch):
@@ -708,7 +711,7 @@ def test_concept_blocks_falls_back_when_baidu_empty(monkeypatch):
                         lambda *a, **k: FakeResp({"ResultCode": "0", "Result": {"603613": []}}))
     monkeypatch.setattr(a_stock, "_em_concept_blocks", lambda code: "EM_FALLBACK_BODY")
 
-    assert a_stock.get_concept_blocks("603613") == "EM_FALLBACK_BODY"
+    assert a_stock.get_concept_blocks("603613", a_stock._market_today().isoformat()) == "EM_FALLBACK_BODY"
 
 
 def test_concept_blocks_keeps_baidu_error_when_fallback_empty(monkeypatch):
@@ -717,7 +720,7 @@ def test_concept_blocks_keeps_baidu_error_when_fallback_empty(monkeypatch):
                         lambda *a, **k: FakeResp({"ResultCode": "1", "ResultMsg": "blocked"}))
     monkeypatch.setattr(a_stock, "_em_concept_blocks", lambda code: "")
 
-    out = a_stock.get_concept_blocks("603613")
+    out = a_stock.get_concept_blocks("603613", a_stock._market_today().isoformat())
 
     assert "Baidu PAE error" in out and "blocked" in out
 
@@ -739,7 +742,7 @@ def test_concept_blocks_prefers_baidu_when_healthy(monkeypatch):
 
     monkeypatch.setattr(a_stock, "_em_concept_blocks", _em)
 
-    out = a_stock.get_concept_blocks("603613")
+    out = a_stock.get_concept_blocks("603613", a_stock._market_today().isoformat())
 
     assert called["em"] is False, "百度健康时不应触发降级"
     assert "百度股市通" in out
@@ -757,7 +760,7 @@ def test_concept_blocks_survives_fallback_exception(monkeypatch):
 
     monkeypatch.setattr(a_stock, "_em_concept_blocks", boom)
 
-    out = a_stock.get_concept_blocks("603613")
+    out = a_stock.get_concept_blocks("603613", a_stock._market_today().isoformat())
 
     assert out.startswith("Error fetching concept blocks for 603613")
     assert "baidu down" in out

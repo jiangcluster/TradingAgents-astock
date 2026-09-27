@@ -363,6 +363,45 @@ eastmoney 全系北向资金接口（含 akshare `stock_hsgt_hist_em`、datacent
 
 ---
 
+## Week 8 — 数据守卫 / 门控词表 / 评级来源边界（2026-09-27）
+
+**目的：** 承接 2026-09-27 对 A 股 skill 体系的全面代码审查，本批只取**低风险 3 条**
+（高风险项 —— K 线 `end_date` 的硬截断 —— 仍待 ContextVar 注入方案，未在本批实施）。
+
+**修改文件：**
+
+| 文件 | 改动 |
+|------|------|
+| `tradingagents/dataflows/a_stock.py` | `get_fundamentals` / `get_profit_forecast` 补"缺 curr_date → 截断失效"告警；`get_concept_blocks` 默认值 `""` → `None` 并对缺日期显式告警 |
+| `tradingagents/agents/quality_gate.py` | `FAILURE_MARKERS` 补 9 条实测缺口文案 |
+| `tradingagents/graph/trading_graph.py` | 新增 `finalize_graph_run_detail()`（rating + rating_source）；评级写回 `final_state["rating"]` |
+| `tradingagents/__init__.py` | 版本 0.5.36；docstring「四处同步」订正为五处 |
+| `cli/headless.py` | docstring 示例 `ta_version` → 0.5.36 |
+| `tests/test_quality_gate.py` | 守卫判据重写（与门控同构的子串命中）+ 提取器守卫 + 8 条点名回归 |
+| `tests/test_lookahead_guard.py` | 新增 fundamentals / profit_forecast 缺日期用例；concept_blocks 用例改语义 |
+| `tests/test_signal_processing.py` | 新增 `TestFinalizeExposesSource` |
+| `tests/test_astock_datasrc_fixes.py` | 6 处 concept-blocks 用例显式传分析日（解耦告警前缀） |
+
+### 设计决策
+
+11. **缺日期守卫要"可见"，而不是"补默认值"**：三处接口此前在缺 `curr_date` 时**完全静默**
+    （`_is_historical(None/"")` 为假）。选择输出显式告警而非改必填 —— 必填会让模型漏传时
+    直接调用失败（错误信息进报告），而告警既保留数据、又把"时点截断失效"暴露给模型与门控
+    （该告警文案本身已纳入 `FAILURE_MARKERS`，会触发降级）。
+12. **守卫判据必须与门控实现同构**：门控的判定是 `m in report`（子串命中），而守卫却用窄正则
+    从源码提取"形状"→ 跨行拼接与中文前缀文案全部漏检（实测 9 条）。
+    改为"提取失败语气文案 → 断言存在 marker 为其子串"，两者同构后"漏加词表"必然被拦。
+13. **评级来源只在返回边界补，不动既有返回值**：`finalize_graph_run` 是 CLI / Web / headless
+    的既有契约（返回裸字符串），改类型会波及 `web/pdf_export`（`signal.upper()`）；
+    故新增 `finalize_graph_run_detail()`，既有行为零变化。
+14. **`failure_count` 暂不参与降级**：门控里它只用于 D 判据（"报告主要由失败信息构成"），
+    因此"长报告夹带一行失败文案"目前仍不降级 —— 属**已知边界**；是否改为"至少降 B"
+    会影响门控评级分布，待单独决策。
+15. **`get_hot_stocks` 的 `""` = 市场今天语义保持不变**：有测试锁定且属"故意取当天"，
+    本批不动（避免为一致性引入行为变化）。
+
+---
+
 ### 改动文件汇总（累计）
 
 Week 1-7 共 **47 个文件**受影响（含 22 原有修改 + 22 新增 + 3 配置）：

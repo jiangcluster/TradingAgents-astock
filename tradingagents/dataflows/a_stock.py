@@ -1503,6 +1503,11 @@ def get_fundamentals(
         # 必须明说，否则模型会把今天的估值写成分析日当天的事实（未来函数）。
         if _is_historical(curr_date):
             lines.append(_snapshot_notice(curr_date, "估值与行情数据"))
+        elif not curr_date:
+            # 0.5.36：缺 curr_date 时快照守卫**完全静默**（`_is_historical(None)` 为假），
+            # 与其余财务接口（三表都带 `_missing_curr_date_notice`）不一致 —— 补上，
+            # 使"没传分析日 → 时点截断失效"在报告里可见，而不是与"当时没披露"同形。
+            lines.append(_missing_curr_date_notice())
 
         # --- Tencent: real-time valuation ---
         try:
@@ -2269,6 +2274,9 @@ def get_profit_forecast(
         # 一致预期是"当前"的分析师预测，没有历史时点版本。同上，必须明说。
         if _is_historical(curr_date):
             lines.insert(0, _snapshot_notice(curr_date, "分析师一致预期"))
+        elif not curr_date:
+            # 0.5.36：与 get_fundamentals 同源修复 —— 缺分析日不得静默（见该函数注释）。
+            lines.insert(0, _missing_curr_date_notice())
 
         eps_by_year = {}
         for _, row in df.iterrows():
@@ -2711,7 +2719,7 @@ def get_concept_blocks(
     ticker: Annotated[str, "A-stock code (e.g. 688017)"],
     curr_date: Annotated[
         str, "Analysis date YYYY-MM-DD; used to flag look-ahead when historical"
-    ] = "",
+    ] = None,
 ) -> str:
     """Get concept/sector/region blocks that a stock belongs to (百度股市通).
 
@@ -2726,6 +2734,15 @@ def get_concept_blocks(
         return (
             _snapshot_notice(curr_date, "个股所属板块及其当日涨跌幅")
             + "（板块**名单**是相对稳定的事实，可继续用；涨跌幅不要当分析日当天的数。）\n"
+            + body
+        )
+    if not curr_date:
+        # 0.5.36：默认值由 `""` 收敛为 `None` 并**显式告警**——此前 `""` 使 `_is_historical`
+        # 返回假、守卫静默失效，"没传分析日"与"分析日就是今天"在报告里长得一样
+        # （同类问题见 get_fundamentals / get_profit_forecast）。
+        return (
+            _missing_curr_date_notice()
+            + "（板块**名单**仍是相对稳定的事实，可继续用；当日涨跌幅不得当作分析日当天的数。）\n"
             + body
         )
     return body
