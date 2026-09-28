@@ -2535,6 +2535,9 @@ def _load_northbound_history(
 
     ``before`` 非空时只取该日期（含）之前的行——复盘历史日期时，缓存里
     分析日之后才写入的收盘快照属于未来数据，不能进报告。
+
+    读侧跳过**周末行**（0.5.39）：历史遗留的周六/周日快照（如 2026-09-19）没有行情含义，
+    留在这里会污染"连日同值"停更判定与历史表的均值口径。**只跳过不删**（保留证据）。
     """
     import csv
 
@@ -2549,12 +2552,24 @@ def _load_northbound_history(
             if len(row) >= 3:
                 if before and str(row[0])[:10] > before[:10]:
                     continue
+                if _is_weekend_date(row[0]):
+                    continue
                 try:
                     rows.append((row[0], float(row[1]), float(row[2])))
                 except ValueError:
                     continue
     rows.sort(key=lambda r: r[0])
     return rows[-n:]
+
+
+def _is_weekend_date(value) -> bool:
+    """`YYYY-MM-DD`（或带时间）是否落在周末；无法解析 → False（不误伤）。"""
+    from datetime import date as _date
+
+    try:
+        return _date.fromisoformat(str(value)[:10]).weekday() >= 5
+    except ValueError:
+        return False
 
 
 # 上游停更判定阈值（0.5.39）：HGT 收盘值与最近 N 个**已记录交易日**完全同值即判定停更。

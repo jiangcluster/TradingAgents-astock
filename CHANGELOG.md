@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.40] — 2026-09-28
+
+### Fixed（北向缓存**读侧**跳过周末脏行；批5 收尾）
+
+- `_load_northbound_history` 读侧跳过**周末行**（`_is_weekend_date`）：历史遗留的
+  周六/周日快照（如 2026-09-19）没有行情含义，留在序列里会污染"连日同值"停更判定
+  与历史表的均值口径。**只跳过不删**（保留证据）。
+  解析失败的值返回 `False` → **不误伤**正常行。
+
+**测试**：`tests/test_northbound_cache.py` 再加 2 例（周末行被跳过 / 日期判定边界与
+不误伤）；本地全量 653 passed / 13 skipped。版本号五处同步（0.5.39 → 0.5.40）。
+
 ## [0.5.39] — 2026-09-28
 
 ### Fixed（数据层三处事实性修正；批4）

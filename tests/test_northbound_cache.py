@@ -212,3 +212,28 @@ def test_gap_note_limits_list_length():
     dates = ["2026-01-02", "2026-01-07", "2026-01-12", "2026-01-16", "2026-01-21"]
     note = a_stock._trading_day_gap_note(dates)
     assert note.count("→") <= 3
+
+
+# ---------------------------------------------------------------------------
+# 读侧跳过周末行（0.5.39 批5）：脏样本不进停更判定基线/历史表
+# ---------------------------------------------------------------------------
+def test_history_read_skips_weekend_rows(monkeypatch, tmp_path):
+    from tradingagents.dataflows import a_stock
+
+    _write_history(monkeypatch, tmp_path, [
+        ("2026-09-18", -7.0, "nan"),
+        ("2026-09-19", -9.28, "nan"),      # 周六（脏样本）
+        ("2026-09-22", -3.0, "nan"),
+    ])
+    rows = a_stock._load_northbound_history(20)
+    assert [r[0] for r in rows] == ["2026-09-18", "2026-09-22"]
+
+
+def test_is_weekend_date_safe():
+    from tradingagents.dataflows import a_stock
+
+    assert a_stock._is_weekend_date("2026-09-19") is True     # 周六
+    assert a_stock._is_weekend_date("2026-09-20") is True     # 周日
+    assert a_stock._is_weekend_date("2026-09-18") is False    # 周五
+    assert a_stock._is_weekend_date("junk") is False          # 不误伤
+    assert a_stock._is_weekend_date(None) is False
