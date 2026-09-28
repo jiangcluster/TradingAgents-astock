@@ -890,3 +890,18 @@ def test_dragon_tiger_lists_records_reading_explain_field(monkeypatch):
     assert "## 上榜记录 (1 次)" in out
     assert "日涨幅偏离值达到7%的前5只证券" in out
     assert "近30日未上龙虎榜" not in out
+
+
+def test_dragon_tiger_institution_failure_is_not_silent():
+    """0.5.38：机构动向段的异常此前被裸 `except: pass` 吞掉。
+
+    后果：解析失败与"该股无机构专用席位"在报告里**长得一模一样**（都表现为没有"机构动向"段），
+    属静默缺失。用源码守卫（与本仓 `test_clear_checkpoints_help_documents_risk` 同型的文本断言）
+    锁住两条不变量：失败必须写成 `[数据缺失: 龙虎榜]`，且不得回到裸 pass。
+    """
+    import inspect
+
+    src = inspect.getsource(a_stock.get_dragon_tiger_board)
+
+    assert "机构动向解析失败" in src, "机构动向解析失败未显式标注（回到静默缺失）"
+    assert "except Exception:\n        pass" not in src, "机构动向段又出现裸 pass 吞异常"

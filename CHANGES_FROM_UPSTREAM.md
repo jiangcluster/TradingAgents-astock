@@ -422,6 +422,32 @@ eastmoney 全系北向资金接口（含 akshare `stock_hsgt_hist_em`、datacent
 18. **失败文案纳入 A/B/C 判据，但不进 D/F 计数**：门控 `fail_count` 只统计 D/F（决定是否跳过
     LLM 复审），故把 failure 计入 B/C 既让"长报告夹带取数失败"如实降级，又不会误触发"跳过复审"。
 
+### 第三批（0.5.38）：终裁输入质量 + 门控/数据层加固
+
+| 文件 | 改动 |
+|------|------|
+| `tradingagents/agents/utils/prompt_clip.py` | **新增**：证据截断的单一口径（配置 `evidence_clip_chars` + 来源标注） |
+| `tradingagents/agents/managers/portfolio_manager.py` | 提示词新增「分析师原始报告（截断）」段 |
+| `tradingagents/agents/trader/trader.py` | 改用统一截断口径（数值不变，标注补全） |
+| `tradingagents/agents/quality_gate.py` | 表格判据收紧；`_active_analysts` 兜底改语义；"无报告"分支显式说明且不再复审 |
+| `tradingagents/dataflows/a_stock.py` | 龙虎榜机构动向失败不再静默 |
+| `tradingagents/default_config.py` | 新增配置项 `evidence_clip_chars` |
+
+设计决策：
+
+19. **终裁必须能核对原始证据**：PM 此前只看到"摘要的摘要"（RM 计划 / Trader 方案 / 门控 /
+    风控辩论），而提示词却要求"每个结论都要能追到分析师的证据"。现直接给原始报告（截断），
+    可信度判据仍由数据质量门控段提供（提示词已写明 D/F 是弱证据）—— **不**额外做二次摘要，
+    避免再引入一层有损压缩。
+20. **截断上限走配置而不是散落硬编码**：Trader 里 1500 / 2000 / 1200 三个数字口径不一，
+    PM 干脆不给报告。统一到 `evidence_clip_chars` 后，"终裁能看到多少证据"成为一个**可调参数**
+    （调大 = 提示词与成本同步上升，属显式取舍而非隐式默认）。
+21. **门控判据要与事实对齐**：`has_table` 用"含竖线 + 含 `---`"会把分节线误判为表格；
+    `_active_analysts` 把"未运行"判 F 会凭空凑 fail_count 触发跳过复审。两者都是
+    "判据宽松/错误 → 结论被噪声影响"，故按事实收紧。
+22. **失败不得与"无数据"同形**：龙虎榜机构动向的裸 `except: pass` 是同一模式的第三处
+    （前两处是买卖席位查询、财务表接口），统一改为显式 `[数据缺失: …]` 标注。
+
 ---
 
 ### 改动文件汇总（累计）

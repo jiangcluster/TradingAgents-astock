@@ -193,14 +193,43 @@ def test_hard_check_long_report_with_one_missing_item_is_b():
     assert qg._hard_check_report("fundamentals", report)[0] == "B"
 
 
+@pytest.mark.parametrize("report,expect_table", [
+    (FULL_REPORT, True),
+    ("正文。" * 100 + "\n\n| 指标 | 值 |\n|:--|--:|\n| PE | 20 |\n", True),
+    ("正文。" * 100 + "\n\n|---|\n", True),                        # 单列表格
+    ("正文。" * 100 + "\n\n---\n\n备注 | 说明\n", False),           # 分节线 + 正文竖线 ≠ 表格
+    ("正文。" * 100, False),
+])
+def test_table_detection_requires_a_real_separator_row(report, expect_table):
+    """0.5.38：表格判据由「含 `|` 且含 `---`」收紧为「存在合法 markdown 分隔行」。"""
+    assert bool(qg._TABLE_SEP_RE.search(report)) is expect_table
+
+
+def test_old_lenient_table_rule_misjudged_prose():
+    """旧判据（`"|" in report and "---" in report`）会把"分节线 + 正文竖线"当表格。"""
+    text = "正文。" * 100 + "\n\n---\n\n补充说明 | 备注\n"
+
+    assert "|" in text and "---" in text          # 旧判据在此判"有表"（与事实不符）
+    assert not qg._TABLE_SEP_RE.search(text)      # 新判据正确判"无表"
+    assert qg._hard_check_report("market", text)[0] == "B"
+
+
 # ---------------------------------------------------------------------------
 # 审核范围：只算进图的分析师
 # ---------------------------------------------------------------------------
 
 
-def test_active_analysts_defaults_to_all_when_field_absent():
-    """旧调用方/直接构造 state 时退回全部 7 项，行为不变。"""
-    assert qg._active_analysts({"trade_date": "2026-09-19"}) == list(qg.REPORT_FIELDS)
+def test_active_analysts_without_selection_field_grades_only_non_empty():
+    """0.5.38：缺 `selected_analysts` 时只对**报告非空**者判级（不再退回全部 7 项）。
+
+    原实现把"根本没跑"的分析师当成"跑了但报告为空"判 F —— 凭空凑够 fail_count 会触发
+    "跳过 LLM 复审"，恰恰是本该逐份复核的场景。空报告不算证据，也不该算失败。
+    """
+    assert qg._active_analysts(
+        {"trade_date": "2026-09-19", "market_report": FULL_REPORT}) == ["market"]
+    assert qg._active_analysts({"trade_date": "2026-09-19"}) == []
+    assert qg._active_analysts(
+        {"trade_date": "2026-09-19", "market_report": "   "}) == []      # 空白串不算已运行
 
 
 def test_active_analysts_keeps_only_selected_in_canonical_order():
@@ -236,6 +265,23 @@ def test_gate_grades_only_selected_analysts():
     assert "基本面分析师: [—] 未运行（本次未选中，不计入质量评级）" in out
     assert "本次运行 1 位分析师（另 6 位未选中，未计入评级）" in out
     assert llm.prompts, "门控应当执行 LLM 复审"
+
+
+def test_gate_with_no_reports_says_so_and_skips_review():
+    """0.5.38：全部未运行（或报告全空）→ 显式说明，且**不**发复审请求。
+
+    此前这种 state 会被判 7 个 F：既凭空拉低质量评级、又可能触发"跳过复审"，
+    而真相是"没有任何证据可审" —— 必须与「数据没问题」区分开（下游据此降权）。
+    """
+    llm = FakeLLM()
+    node = qg.create_quality_gate(llm)
+
+    out = node(_state())["data_quality_summary"]
+
+    assert "本次无已运行的分析师报告" in out
+    assert "不代表" in out
+    assert not llm.prompts, "没有可审报告时不该调用 LLM 复审"
+    assert "[F]" not in out, "不得把未运行的分析师判 F"
 
 
 def test_gate_reviews_when_minority_of_selected_reports_fail():

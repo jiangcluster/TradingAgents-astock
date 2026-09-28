@@ -3281,8 +3281,12 @@ def get_dragon_tiger_board(
                 f"| 卖出 {inst_sell/1e4:.0f} 万 "
                 f"| 净额 {(inst_buy - inst_sell)/1e4:.0f} 万"
             )
-    except Exception:
-        pass
+    except Exception as e:
+        # 0.5.38：此前这里是裸 `except Exception: pass` —— 解析失败与"该股无机构专用席位"
+        # 在报告里长得一模一样（都表现为没有"机构动向"段），属**静默缺失**。改为显式标注，
+        # 与上方买卖席位查询失败的处置口径一致（fail-loud，而不是 fail-silent）。
+        lines.append(f"[数据缺失: 龙虎榜] 机构动向解析失败"
+                     f"（{type(e).__name__}: {e}）——机构席位可能不完整")
 
     return "\n".join(lines)
 

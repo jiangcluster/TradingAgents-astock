@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.38] — 2026-09-27
+
+### Fixed（批次 C 续：终裁输入质量 + 门控/数据层加固）
+
+1. **终裁能看到分析师原始报告**（`agents/managers/portfolio_manager.py`）：此前 PM 只拿到
+   RM 计划 / Trader 方案 / 数据质量门控 / 风控辩论史 —— 7 份分析师**原始报告从未进入**
+   "给最终评级"这一步，而提示词却要求 "ground every conclusion in specific evidence from the
+   analysts"。现按统一口径截断后直接给出（`evidence_clip_chars`，默认 1500 字/份），
+   显式标注截断与来源；无报告时写入"本次无分析师报告"。
+   **代价**：终裁提示词增长约 7×1500 字（token 成本上升），可用 `evidence_clip_chars` 调整。
+2. **证据截断口径统一**（新增 `agents/utils/prompt_clip.py`）：Trader 里原散着
+   1500 / 2000 / 1200 三个硬编码数字，且标注只写"完整内容见分析师报告"（不说是哪一份）。
+   现报告类上限集中到 `evidence_clip_chars`，截断一律带"上限 + 来源"标注；辩论史 / 门控结论
+   各自尺度保留（**数值不变**）。
+3. **门控表格判据收紧**（`agents/quality_gate.py`）：原 `has_table = "|" in report and
+   "---" in report` —— 报告里只要同时出现一个竖线与一行 `---`（分节线、正文破折号串）就被
+   当成"有汇总表格"。现要求存在**合法 markdown 分隔行**（`_TABLE_SEP_RE`）。
+4. **`_active_analysts` 兜底不再把"未运行"当 F**：state 缺 `selected_analysts` 时原实现退回
+   全部 7 项 → 把"根本没跑"的分析师判 F，凭空凑够 fail_count 触发"跳过 LLM 复审"。
+   现只对**报告非空**者判级；"无任何已运行报告"时显式说明并**不**调用复审
+   （此前会发一次无意义的复审请求）。
+5. **龙虎榜机构动向不再静默吞异常**（`dataflows/a_stock.py`）：原为裸 `except: pass` ——
+   解析失败与"该股无机构专用席位"在报告里**同形**。现输出
+   `[数据缺失: 龙虎榜] 机构动向解析失败…`，与买卖席位查询失败的处置口径一致。
+
+- 测试：新增 `tests/test_decision_evidence.py`（13 例：PM 原始报告段 / Trader 截断口径 /
+  `clip_evidence` 与配置回退）；`test_quality_gate.py` 更新 `_active_analysts` 语义并新增
+  表格判据、"无报告"用例；`test_astock_datasrc_fixes.py` 新增机构动向静默守卫。
+  本机全量 **653 passed / 13 skipped**（两个 cli 测试因本机缺 `prompt_toolkit` 未收集）。
+- 版本号五处同步（0.5.37 → 0.5.38）。
+
 ## [0.5.37] — 2026-09-27
 
 ### Fixed（批次 C 第二批：K 线 `end_date` 硬截断 + 门控降级判据）

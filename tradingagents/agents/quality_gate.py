@@ -1,8 +1,15 @@
 from typing import Annotated
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+# markdown 表格分隔行：整行只由 `| - : 空白` 组成，且**至少含一个 `|` 与一个 `-`**
+# （覆盖 `| --- | --- |`、`|:--|--:|`、单列表格等常见写法）。
+# 0.5.38：此前判据是 `"|" in report and "---" in report` —— 报告里只要同时出现一个竖线
+# 与一行 `---`（分节线，甚至正文里的破折号串）就会被当成"有汇总表格"。
+_TABLE_SEP_RE = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|[\s:|-]*$", re.M)
 
 REPORT_FIELDS = {
     "market": "market_report",
@@ -90,7 +97,7 @@ def _hard_check_report(analyst_type: str, report: str) -> tuple:
     if failure_count > 0 and len(stripped.strip()) < MIN_REPORT_LENGTH:
         return ("D", f"报告主要由失败信息构成 ({failure_count} 处)")
 
-    has_table = "|" in report and "---" in report
+    has_table = bool(_TABLE_SEP_RE.search(report))
     missing_count = report.count("[数据缺失")
 
     issues = []
@@ -118,18 +125,20 @@ def _active_analysts(state) -> list:
 
     未选中者不进图、报告必为空——若照旧一律判 F，选 1-3 个分析师时会凭空凑出 ≥4 个 F，
     反而把 LLM 复审整段跳过。故门控**只对已运行的分析师判级**。
-    状态里没有该字段（旧调用方/直接构造 state）时，退回"全部 7 项"，保持原行为并告警——
-    这种兜底本身是危险的（把没跑过的分析师当成"跑了但报告为空"），必须留下痕迹。
+
+    状态里没有 `selected_analysts`（旧 checkpoint / 手工构造 state）时：0.5.38 起退回
+    "**报告非空**的分析师"——原实现退回全部 7 项，会把"根本没跑"的分析师当成"跑了但报告
+    为空"判 F，凭空凑够 fail_count 触发"跳过 LLM 复审"（本该逐份复核的场景）。留痕照旧。
     """
     selected = state.get("selected_analysts")
     if not selected:
         logger.warning(
-            "quality gate: state has no `selected_analysts`; grading all %d analyst "
-            "reports. Analysts that never ran will be graded F — check whether this "
-            "run really used all of them (old checkpoint / hand-built state?).",
-            len(REPORT_FIELDS),
+            "quality gate: state has no `selected_analysts`; grading only analysts "
+            "with a non-empty report. Analysts that never ran are NOT counted as "
+            "failures (old checkpoint / hand-built state?).",
         )
-        return list(REPORT_FIELDS)
+        return [a for a in REPORT_FIELDS
+                if str(state.get(REPORT_FIELDS[a]) or "").strip()]
     return [a for a in REPORT_FIELDS if a in set(selected)]
 
 
@@ -235,7 +244,14 @@ def create_quality_gate(llm):
         )
 
         llm_review = ""
-        if not _should_skip_review(fail_count, len(hard_results)):
+        if not hard_results:
+            # 0.5.38：`_active_analysts` 不再把"未运行"当 F 之后，"全部未运行"会走到这里。
+            # 对 0 份报告发复审请求没有意义；但也不能静默留空 —— 必须与"数据没问题"区分开。
+            llm_review = (
+                "（**本次无已运行的分析师报告**，无可复审内容。这**不代表**数据没有问题："
+                "下游应按「无证据」处理并主动降权，且不得据「缺数据」推出方向性结论。）"
+            )
+        elif not _should_skip_review(fail_count, len(hard_results)):
             try:
                 review_prompt = _build_review_prompt(reports, trade_date, ticker, analysts)
                 response = llm.invoke(review_prompt)

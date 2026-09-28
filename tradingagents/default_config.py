@@ -120,6 +120,11 @@ DEFAULT_CONFIG = {
     # 单个分析师的工具调用轮次上限（0/负数会让分析师的工具循环失去唯一护栏）。
     # 正常使用是 1-3 轮；模型反复调同一工具时此前没有上限，只能撞全图 recursion_limit。
     "max_tool_rounds_per_analyst": 12,
+    # 决策节点（Trader / Portfolio Manager）引用**单份分析师报告**的截断上限（字符数）。
+    # 0.5.38：此前 Trader 里散着 1500/2000/1200 三个硬编码数字、PM 完全不给原始报告，
+    # 统一到本项后"终裁能看到的证据量"可集中调整（调大 = 提示词与成本同步上升）。
+    # 见 agents/utils/prompt_clip.py。
+    "evidence_clip_chars": 1500,
     # Data vendor configuration
     # Category-level configuration (default for all tools in category)
     "data_vendors": {

@@ -12,6 +12,7 @@ from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
+from tradingagents.agents.utils.prompt_clip import clip_evidence
 
 # The schema alone cannot stop the model from putting price levels into the
 # free-text reasoning field, so the prompt says it explicitly too.
@@ -20,13 +21,11 @@ _NO_LEVELS_INSTRUCTION = (
     "stop-loss levels, target prices or position sizes for this security."
 )
 
-
-def _clip(text: str, limit: int) -> str:
-    """截断长报告（Trader 只需决策相关要点，避免提示词被无关篇幅挤爆）。"""
-    text = (text or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "\n...（已截断，完整内容见分析师报告）"
+# 分析师报告的截断上限走配置（`evidence_clip_chars`，见 prompt_clip）；辩论史与门控结论
+# 性质不同、尺度也不同，保留各自常量。**0.5.38 数值与改前一致** —— 本步只统一口径，
+# 并把截断标注补全（原来只写"完整内容见分析师报告"，不说是哪一份）。
+_DEBATE_HISTORY_CHARS = 2000
+_QUALITY_SUMMARY_CHARS = 1200
 
 
 def create_trader(llm):
@@ -58,20 +57,28 @@ def create_trader(llm):
         # 技术面/基本面原文与整段多空辩论**从未进入"决定买/卖"这一步**，
         # 提示词却声称"based on a comprehensive analysis by a team of analysts"。
         evidence_parts = []
-        market_report = _clip(state.get("market_report", ""), 1500)
-        fundamentals_report = _clip(state.get("fundamentals_report", ""), 1500)
+        market_report = clip_evidence(
+            state.get("market_report", ""), source="Market / Technical Report")
+        fundamentals_report = clip_evidence(
+            state.get("fundamentals_report", ""), source="Fundamentals Report")
         if market_report:
             evidence_parts.append(f"Market / Technical Report:\n{market_report}")
         if fundamentals_report:
             evidence_parts.append(f"Fundamentals Report:\n{fundamentals_report}")
-        debate_history = _clip(
-            state.get("investment_debate_state", {}).get("history", ""), 2000
+        debate_history = clip_evidence(
+            state.get("investment_debate_state", {}).get("history", ""),
+            source="Bull/Bear Research Debate",
+            limit=_DEBATE_HISTORY_CHARS,
         )
         if debate_history:
             evidence_parts.append(f"Bull/Bear Research Debate (truncated):\n{debate_history}")
         quality = state.get("data_quality_summary", "")
         if quality:
-            evidence_parts.append(f"Data Quality Gate:\n{_clip(quality, 1200)}")
+            evidence_parts.append(
+                "Data Quality Gate:\n"
+                + clip_evidence(quality, source="Data Quality Gate",
+                                limit=_QUALITY_SUMMARY_CHARS)
+            )
         evidence_context = "\n\n".join(evidence_parts)
 
         messages = [

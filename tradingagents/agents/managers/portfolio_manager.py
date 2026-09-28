@@ -19,6 +19,7 @@ from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
 )
+from tradingagents.agents.utils.prompt_clip import clip_evidence
 
 
 # Mirrors the Trader: the schema alone cannot stop the model from putting
@@ -26,6 +27,20 @@ from tradingagents.agents.utils.structured import (
 _NO_LEVELS_RULE = (
     "\n- Do NOT state entry prices, stop-loss levels, target prices or "
     "position sizes for this security; give the rating and the reasoning."
+)
+
+# 终裁可见的原始报告（顺序 = 提示词中的呈现顺序）。
+# 0.5.38：此前终裁**只**看到 RM 计划 / Trader 方案 / 数据质量门控 / 风控辩论史 ——
+# 7 份分析师原始报告从未进入"给最终评级"这一步，而提示词却要求
+# "ground every conclusion in specific evidence from the analysts"。
+_ANALYST_EVIDENCE_FIELDS = (
+    ("market_report", "Market / Technical Report"),
+    ("fundamentals_report", "Fundamentals Report"),
+    ("news_report", "News Report"),
+    ("sentiment_report", "Social / Sentiment Report"),
+    ("policy_report", "Policy Report"),
+    ("hot_money_report", "Hot Money / Capital Flow Report"),
+    ("lockup_report", "Lockup Expiry / Insider Reduction Report"),
 )
 
 
@@ -50,6 +65,16 @@ def create_portfolio_manager(llm):
             if past_context
             else ""
         )
+
+        # 分析师原始报告（0.5.38）：按统一口径截断后直接给出，使终裁能核对原始证据，
+        # 而不是只看"摘要的摘要"。可信度判据由上面的数据质量门控段提供（提示词已写明
+        # "reports graded D/F are weak evidence"），此处不重复判定、也不做二次摘要。
+        raw_parts = []
+        for field, label in _ANALYST_EVIDENCE_FIELDS:
+            text = clip_evidence(state.get(field, ""), source=label)
+            if text:
+                raw_parts.append(f"### {label}\n{text}")
+        raw_reports = "\n\n".join(raw_parts)
 
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
 
@@ -117,6 +142,9 @@ def create_portfolio_manager(llm):
 - Data quality gate (reports graded D/F are weak evidence — do not build the rating on them):
 {quality if quality else "（本次无数据质量门控结论）"}
 {lessons_line}
+**Analyst Reports** (truncated; every rating must be traceable to these, to the plan above, or to the debate):
+{raw_reports if raw_reports else "（本次无分析师报告）"}
+
 **Risk Analysts Debate History:**
 {history}
 
