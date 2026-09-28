@@ -1409,10 +1409,51 @@ def get_stock_data(
     header += f"# Total records: {len(df)}\n"
     header += f"# Data source: {data_source}\n"
     header += (
-        f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     )
+    # 日期跳档说明（0.5.39）：序列里"少一天"最常见的原因是**休市**（周末/法定节假日），
+    # 不是数据缺失。此前分析师的"数据完整性"检查把 09-24→09-28 的跳档直接写成
+    # 「数据源缺失 2026-09-25 一个交易日」并据此降权（2026-09-28 实况），属事实误判。
+    # 这里只给**可验证**的分类，不臆断接口故障。
+    header += _trading_day_gap_note(df["Date"].tolist())
+    header += "\n"
 
     return header + csv_out
+
+
+def _trading_day_gap_note(dates) -> str:
+    """日期跳档 → 一行说明（无"含工作日"跳档时返回空串）。
+
+    - **纯周末**跳档（如周五→周一）属正常休市，**不输出**（避免每日噪声）；
+    - 区间**含工作日**（如 09-24→09-28 缺 09-25=中秋休市）→ 如实写成
+      "无法仅凭序列区分『法定节假日休市』与『确实少 bar』"，
+      并明确**不得据此断言数据源缺失/接口异常**。
+    """
+    from datetime import date as _date
+    from datetime import timedelta as _timedelta
+
+    parsed = []
+    for d in dates or []:
+        try:
+            parsed.append(_date.fromisoformat(str(d)[:10]))
+        except ValueError:
+            continue
+    if len(parsed) < 2:
+        return ""
+    gaps = []
+    for prev, nxt in zip(parsed, parsed[1:]):
+        span = (nxt - prev).days
+        if span <= 2:            # 相邻交易日（含跨周末）→ 正常
+            continue
+        mid = [prev + _timedelta(days=i) for i in range(1, span)]
+        if all(m.weekday() >= 5 for m in mid):
+            continue             # 纯周末休市 → 正常，不打噪声
+        gaps.append(f"{prev.isoformat()}→{nxt.isoformat()}")
+    if not gaps:
+        return ""
+    return ("# 日期跳档说明：含工作日跳档 " + ", ".join(gaps[:3])
+            + "（可能为法定节假日休市，也可能确实少 bar——**无法仅凭序列区分**，"
+              "请勿据此断言『数据源缺失/接口异常』）\n")
 
 
 # ---- 2. get_indicators ----
@@ -2516,6 +2557,47 @@ def _load_northbound_history(
     return rows[-n:]
 
 
+# 上游停更判定阈值（0.5.39）：HGT 收盘值与最近 N 个**已记录交易日**完全同值即判定停更。
+_NB_STALE_MIN_DAYS = 3
+# 停更标记（**跨仓契约**：深研 `advisor/data_health.py` 按该串把缺失项归入
+# 「接口/数据源不可用」，改文案需同步两侧）
+_NB_STALE_MARKER = "[数据源停更]"
+
+
+def _northbound_stale_note(today_hgt: float, min_days: int = _NB_STALE_MIN_DAYS) -> str:
+    """HGT 收盘值与最近 N 个已记录交易日**完全同值** → 判定上游停更，返回告警文案。
+
+    2026-09-28 实测：同花顺 hsgtApi `dayChart` 的序列终值连续 **12 个交易日**恒为
+    −9.28（当场重新请求，终值仍是 −9.28），且 SGT 盘中停更 → 该源**整体不可用**。
+    此前报告把它当当日真实净流出、还给出 `Signal: Net northbound OUTFLOW (bearish)`
+    ——属**把坏值当证据**；现改为显式停更告警并**撤销方向信号**。
+    """
+    try:
+        today = str(_market_today())[:10]
+        hist = [h for d, h, _ in _load_northbound_history(30)
+                if str(d)[:10] != today]
+    except Exception:  # noqa: BLE001 —— 判定失败不得影响取数
+        return ""
+    if not hist:
+        return ""
+    same = 0
+    for h in reversed(hist):
+        try:
+            if abs(float(h) - float(today_hgt)) < 1e-9:
+                same += 1
+                continue
+        except (TypeError, ValueError):
+            pass
+        break
+    if same < min_days:
+        return ""
+    return (
+        f"\n⚠️ {_NB_STALE_MARKER} 同花顺 hsgtApi 的沪股通收盘值（{today_hgt:.2f} 亿）与最近 "
+        f"{same} 个交易日**完全相同** → 判定上游已停更：该数值**不得**作为资金流向证据，"
+        f"也不得用于趋势判断（方向信号已撤销，请视为『北向数据不可得』）。"
+    )
+
+
 def get_northbound_flow(
     curr_date: Annotated[str, "Date YYYY-MM-DD"],
     include_history: Annotated[
@@ -2601,7 +2683,14 @@ def get_northbound_flow(
                     f"SGT(深股通)={sgt_close:.2f}亿 "
                     f"Total={total:.2f}亿"
                 )
-            if total > 0:
+            # 上游停更判定（0.5.39）：值恒定 → 明确告警并**撤销方向信号**（详见 helper）
+            stale_note = _northbound_stale_note(hgt_close)
+            if stale_note:
+                lines.append(stale_note)
+                lines.append(
+                    "Signal: N/A — 上游停更，方向不可判（**不得**据此看多/看空）"
+                )
+            elif total > 0:
                 lines.append("Signal: Net northbound INFLOW (bullish)")
             elif total < 0:
                 lines.append("Signal: Net northbound OUTFLOW (bearish)")
@@ -2613,7 +2702,15 @@ def get_northbound_flow(
 
         if got_realtime:
             # 快照日期用市场时区：否则 hosts 在 UTC+8 以西时会把昨天写进今天的键。
-            _save_northbound_snapshot(_market_today().isoformat(), hgt_close, sgt_close)
+            # 周末守卫（0.5.39）：非交易日不写快照——写进去等于**伪造一天的样本**
+            # （2026-09-19（周六）实测被写入一行），并会污染"连日同值"的停更判定基线。
+            today = _market_today()
+            if today.weekday() >= 5:
+                lines.append(
+                    f"（未写入本地快照：{today.isoformat()} 是周末——非交易日，写入会伪造样本）"
+                )
+            else:
+                _save_northbound_snapshot(today.isoformat(), hgt_close, sgt_close)
 
         if include_history:
             history = _load_northbound_history(

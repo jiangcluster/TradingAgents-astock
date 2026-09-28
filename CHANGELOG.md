@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.39] — 2026-09-28
+
+### Fixed（数据层三处事实性修正；批4）
+
+1. **北向上游停更识别**（`dataflows/a_stock.py::_northbound_stale_note`）：HGT 收盘值与最近
+   `_NB_STALE_MIN_DAYS`（默认 3）个**已记录交易日**完全同值即判定上游停更 → 数据块输出
+   `⚠️ [数据源停更] …（该数值不得作为资金流向证据）`，并**撤销**方向信号
+   （`Signal: Net northbound INFLOW/OUTFLOW` → `Signal: N/A — 上游停更，方向不可判`）。
+   实测依据（2026-09-28）：同花顺 hsgtApi 的 HGT 终值连续 **12 个交易日**恒为 −9.28，
+   当场重新请求终值仍是 −9.28 → 该源**整体**停更。此前报告把坏值当当日真实净流出并给出
+   看空方向信号，**属把坏值当证据**。
+   标记串 `[数据源停更]` 为**跨仓契约**（深研 `advisor/data_health.py` 据此归因，见 0.24.41）。
+2. **非交易日不写北向快照**（`get_northbound_flow`）：周末（`weekday() >= 5`）跳过写盘并说明
+   ——写进去等于**伪造一天的样本**（2026-09-19 周六实测被写入一行），且会污染"连日同值"
+   停更判定基线。
+3. **K 线日期跳档说明**（`dataflows/a_stock.py::_trading_day_gap_note`，接入 `get_stock_data`
+   数据块头部）：新增 `# 日期跳档说明：含工作日跳档 …（可能为法定节假日休市，也可能确实少 bar
+   ——无法仅凭序列区分，请勿据此断言『数据源缺失/接口异常』）`；**纯周末跳档不输出**（避免
+   每日噪声）。防止把 09-25（中秋休市）误报成"数据源缺失一个交易日"并给报告降权。
+
+**测试**：`tests/test_northbound_cache.py` 新增 11 例（停更阈值 / 同值 / 异值 / 忽略今日行 /
+坏文件不抛 / 周末不写盘 / 跳档判定与截断）。本地全量 **653 passed / 13 skipped**
+（`tests/test_cli_default_command.py` 与 `test_ticker_symbol_handling.py` 因缺可选依赖
+`prompt_toolkit` 无法收集，与本批改动无关）。
+版本号五处同步（0.5.38 → 0.5.39）。
+
 ## [0.5.38] — 2026-09-27
 
 ### Fixed（批次 C 续：终裁输入质量 + 门控/数据层加固）
