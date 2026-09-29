@@ -158,3 +158,45 @@ def test_clear_checkpoints_help_documents_risk():
     help_block = src[idx: idx + 900]
     assert "RISK" in help_block
     assert "no lock" in help_block or "无锁" in help_block
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# 反向对照（B9 negative control）：守卫不仅要"能通过"，还必须能**命中伪造的缺陷**，
+# 否则规则被写坏时会静默失效。以下用例用运行时拼接/临时目录构造被检形态，证明检测链仍在工作。
+# ───────────────────────────────────────────────────────────────────────────
+def test_extractor_flags_fabricated_missing_reference():
+    """反向对照（B1）：把必然不存在的引用令牌放进文档文本，提取器必须能提出来、
+    且解析器必须判其为缺失；否则 B1 守卫在提取器/解析器被写坏时会静默放行悬空引用。"""
+    fabricated = "tradingagents/dataflows/__definitely_missing__.py"
+    refs = _extract_refs("详见 `%s` 中的说明。" % fabricated)
+    assert fabricated in refs, "提取器未提取出伪造引用，B1 守卫已空转"
+    rel_files = _relative_files()
+    basenames = {Path(f).name for f in rel_files}
+    assert not _resolve_ref(fabricated, rel_files, basenames), "解析器未把伪造引用判为缺失，B1 守卫已空转"
+
+
+def test_detector_flags_fabricated_private_key_shape():
+    """反向对照（B7）：运行时拼接出私钥头形态，凭据针必须能命中（否则内嵌私钥可静默入库）。"""
+    fabricated = "-----BEGIN " + "RSA" + " PRIVATE KEY-----"
+    text = "blob = '''\n%s\nabc\n'''" % fabricated
+    assert any(needle in text for needle in _PRIVATE_KEY_NEEDLES)
+
+
+def test_detector_flags_fabricated_api_key_shape_and_ignores_ordinary_text():
+    """反向对照（B7）：`sk-` 形态密钥必须命中；正常中文文本不得误命中（防规则过宽）。"""
+    fabricated = "sk-" + "A" * 24
+    assert re.search(r"\bsk-[A-Za-z0-9]{24,}\b", fabricated)
+    assert not re.search(r"\bsk-[A-Za-z0-9]{24,}\b", "普通文本不含密钥形态。")
+
+
+def test_residue_predicate_flags_fabricated_leftovers(tmp_path):
+    """反向对照（B7）：临时/备份残留判据必须命中 `.tmp/.bak/.orig/.rej/.swp` 与 `~` 结尾名；
+    否则 `test_repo_has_no_credentials_or_temp_residue` 会永远漏检残留。"""
+    names = ("x.tmp", "x.bak", "x.orig", "x.rej", "x.swp", "x~")
+    for n in names:
+        (tmp_path / n).write_text("x", encoding="utf-8")
+    flagged = {
+        p.name for p in tmp_path.iterdir()
+        if p.suffix in {".tmp", ".bak", ".orig", ".rej", ".swp"} or p.name.endswith("~")
+    }
+    assert flagged == set(names), "残留判据未覆盖部分伪造残留：%s" % sorted(flagged)

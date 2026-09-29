@@ -1,22 +1,26 @@
 """提示词证据截断（Trader 与 Portfolio Manager 共用，口径统一）。
 
-为什么独立模块：两个决策节点的证据窗口此前各写各的（Trader 里散着 1500 / 2000 / 1200
-三个硬编码数字，PM 干脆**不给**原始报告）—— 口径分散正是"终裁看不到原始证据"的成因之一。
+为什么独立模块：两个决策节点的证据窗口此前各写各的（Trader 里散着三个硬编码数字，PM 干脆
+**不给**原始报告）—— 口径分散正是"终裁看不到原始证据"的成因之一。
 统一到此处后：报告类上限走配置（`evidence_clip_chars`），截断一律带**显式标注**
 （模型能看出这里被截断，也知道完整内容去哪里找，而不是误以为拿到的是全文）。
 
 0.5.38：Trader 改用本模块（数值不变，仅集中口径与标注）；PM 新增"分析师原始报告"段。
+0.5.42（B17 阈值单源）：兜底值**不再在本文件写字面量**，改由 `default_config` 派生——
+此前两处同值却各自硬编码，改一处即静默漂移（无任何守卫）。
 """
 from __future__ import annotations
 
 from typing import Optional
 
-# 配置缺失时的兜底上限（与 default_config 的 `evidence_clip_chars` 默认值保持一致）
-DEFAULT_EVIDENCE_CHARS = 1500
+from tradingagents.default_config import DEFAULT_CONFIG
+
+# 配置缺失时的兜底上限：**单源**取自 `default_config["evidence_clip_chars"]`（B17 阈值单源）
+DEFAULT_EVIDENCE_CHARS = int(DEFAULT_CONFIG["evidence_clip_chars"])
 
 
 def evidence_clip_limit() -> int:
-    """当前生效的**单份报告**截断上限（配置项 `evidence_clip_chars`，缺省 1500）。
+    """当前生效的**单份报告**截断上限（配置项 `evidence_clip_chars`，缺省取模块常量）。
 
     配置不可用 / 非法一律回落默认：截断上限不该让决策链挂掉。
     """

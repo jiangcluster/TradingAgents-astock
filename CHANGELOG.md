@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.42] — 2026-09-29
+
+### Fixed（B17 阈值单源）+ Added（B10 时区白名单守卫、B9 反向对照）
+
+**动因（2026-09-29 批 3 基线完善）**：0.5.38 把证据截断口径集中到 `evidence_clip_chars`，但
+`prompt_clip.DEFAULT_EVIDENCE_CHARS` 仍**另写一份 1500**（注释只说"保持一致"）——同值却无守卫，
+改一处即静默漂移；时区使用点也一直没有清单（只有 2026-09-26 的人工评估结论）。
+
+- **B17 阈值单源**：`prompt_clip.DEFAULT_EVIDENCE_CHARS` 改为**从 `default_config` 派生**
+  （`DEFAULT_CONFIG["evidence_clip_chars"]`），本文件不再写字面量；新增
+  `tests/test_threshold_single_source.py`（3 例）——AST 判据下 `1500` 只允许出现在
+  `default_config.py`、`1200`（门控结论截断，性质不同的独立尺度）只允许在 `trader.py`，
+  并断言"凭空造数字必被判不存在"（防提取器空转）。
+- **B10 时区白名单**：新增 `tests/test_timezone_whitelist.py`（4 例）——AST 统计**无 tz** 的
+  `datetime.now()/today()`（注释/文档字符串不计数），4 文件 / 19 处逐条登记理由
+  （数据块 `# Data retrieved on:` 展示戳 17、Alpha Vantage 美股路径 1、无调用方的旧工具函数 1），
+  并锁定 `_market_today()` 这个 A 股日期口径入口仍在位。
+- **B9 反向对照**：`tests/test_repo_guard.py` +4 例（伪造缺失引用必须被 `_extract_refs` 提取并判缺失；
+  拼接的私钥/`sk-` 形态必须命中且无害文本不误报；残留判据对 `.tmp/.bak/.orig/.rej/.swp/~` 必须全部命中）。
+
+**测试**：本地全量 **680 passed / 13 skipped / 48 subtests**。版本号五处同步（0.5.41 → 0.5.42）。
+
 ## [0.5.41] — 2026-09-29
 
 ### Added（Tests：交易日一致性**接线**守卫；批 2 基线完善）
