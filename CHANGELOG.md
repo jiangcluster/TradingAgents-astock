@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.5.41] — 2026-09-29
+
+### Added（Tests：交易日一致性**接线**守卫；批 2 基线完善）
+
+**动因（2026-09-29）**：周末门的行为用例 0.5.39/0.5.40 已建（`test_northbound_cache.py`），但
+**接线本身没有守卫**——日后重构完全可能"把 `_is_weekend_date` 留着、却不再被写/读路径调用"
+（函数孤岛式静默退化：周末样本又被写进快照、或脏行又混进历史序列）。
+
+- 新增 `tests/test_trading_day_guard.py`（4 例）：
+  - `_is_weekend_date` 三态（周六/周日 True、周五 False；空值/非法/不存在的日期 **False 而非抛错**）；
+  - **写侧**：`get_northbound_flow` 体内必须含 `weekday() >= 5` 的非交易日门；
+  - **读侧**：`_load_northbound_history` 必须调用 `_is_weekend_date()` 过滤历史脏行；
+  - 市场时区口径（`_market_today()`，0.5.35）仍在位。
+- 纯源码 AST + 纯函数行为，不触网。
+
+**测试**：本地全量 **669 passed / 13 skipped / 48 subtests**。版本号五处同步（0.5.40 → 0.5.41）。
+
 ## [0.5.40] — 2026-09-28
 
 ### Fixed（北向缓存**读侧**跳过周末脏行；批5 收尾）
