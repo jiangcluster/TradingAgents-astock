@@ -56,6 +56,7 @@ from .setup import ROLE_KEYS, GraphSetup
 from .propagation import Propagator
 from .reflection import Reflector
 from .signal_processing import SignalProcessor
+from ..llm_clients.factory import _OPENAI_COMPATIBLE
 
 # 七个分析师角色——它们受 `selected_analysts` 控制，没选中就不会进图。
 _ANALYST_ROLES = frozenset({
@@ -63,10 +64,18 @@ _ANALYST_ROLES = frozenset({
 })
 
 # 各家 provider 私有的参数：换了 provider 就不能带过去（别家可能直接拒收）。
+# ⚠️ 超时/重试**不在**这张表里——它们由 `_resilience_kwargs()` 按目标 provider
+#    重算（见那里的注释）。放进来会变成第二道判据，两道判据迟早对不上。
 _PROVIDER_SPECIFIC_KWARGS = frozenset({
     "reasoning_effort",   # openai
     "thinking_level",     # google
     "effort",             # anthropic
+})
+
+# 超时与重试三件套：由 `_resilience_kwargs()` 统一产出，也由它统一覆盖。
+# 任何继承来的 llm_kwargs 在换目标 provider 时，这几个键都要先剔除再重算。
+_RESILIENCE_KWARGS = frozenset({
+    "timeout", "max_retries", "app_retries", "app_retry_delay",
 })
 
 
@@ -223,9 +232,15 @@ class TradingAgentsGraph:
                 # provider 做降级时不能把它带过去（例如把 anthropic 降级请求发到
                 # MiniMax 网关），否则同样是撞额度那一刻才炸。None ⇒ 该 provider
                 # 用自己的默认端点。
-                cross_provider = bool(_fb_provider) and _fb_provider != self.config["llm_provider"]
+                # provider 比较一律 strip+lower：配成 "DeepSeek" 时**同一家**会被判成
+                # 跨厂商，`backend_url` 就被扔掉，降级请求发去该 provider 的默认端点
+                # ——同样是撞额度那一刻才炸。
+                _fb_norm = str(_fb_provider or "").strip().lower()
+                _main_norm = str(self.config["llm_provider"] or "").strip().lower()
+                cross_provider = bool(_fb_norm) and _fb_norm != _main_norm
+                _fb_effective = _fb_norm or _main_norm
                 fallback_spec = {
-                    "provider": _fb_provider or self.config["llm_provider"],
+                    "provider": _fb_effective,
                     "model": _fb_model or self.config[fallback_model_key],
                     "base_url": None if cross_provider else self.config.get("backend_url"),
                     # 带上 callbacks：降级意味着**开始计费**，此时统计/成本回调
@@ -236,12 +251,22 @@ class TradingAgentsGraph:
                     # 用户配 max_tokens 想避免的事（#91）。
                     **({"max_tokens": self.config["max_tokens"]}
                        if self.config.get("max_tokens") else {}),
+                    # 超时与应用层重试同样要带过去：降级是**撞额度那一刻**才走到的
+                    # 路径，而降级目标往往就是一个 OpenAI 兼容网关——正是那个
+                    # "永不返回"的洞所在。判据按 `_fb_effective`（真正的目标）算。
+                    **self._resilience_kwargs(_fb_effective),
                 }
                 return create_llm_client(
                     provider="claude_agent_sdk",
                     model=self.config[sdk_model_key],
                     base_url=self.config.get("backend_url"),
                     fallback_spec=fallback_spec,
+                    # 订阅**主路径**自己也要超时。它不走 LangChain 客户端，所以
+                    # 给所有 provider 加的那份 timeout 一点都罩不到它——上面
+                    # fallback_spec 里那个只在**已经降级之后**才生效，而卡死恰恰
+                    # 发生在降级之前。判据按 "claude_agent_sdk" 自己算：它不是
+                    # OpenAI 兼容客户端，只该拿 timeout，不该拿应用层重试。
+                    **self._resilience_kwargs("claude_agent_sdk"),
                 )
             return create_llm_client(
                 provider=self.config["llm_provider"],
@@ -354,12 +379,18 @@ class TradingAgentsGraph:
                     f'例如 {{"provider": "deepseek", "model": "deepseek-chat"}}。'
                 )
             provider = spec.get("provider") or main_provider
+            # role_llms 的 provider 是用户手写的自由字符串（README 通篇写作
+            # "DeepSeek"）。下面四处判据 —— base_url / 专属参数 / 韧性参数 / 缓存键
+            # —— 必须用**同一个**归一化结果，否则会出现"这处算同一家、那处算跨厂商"。
+            # 口径与 factory.create_llm_client 一致：strip().lower()。
+            provider_norm = provider.strip().lower()
+            main_norm = str(main_provider or "").strip().lower()
             # backend_url 是给主 provider 配的端点。换了厂商还把它带过去，请求就会
             # 发到另一家的网关（和 agent_sdk 降级那里同一个坑）。None = 用该
             # provider 自己的默认端点。
             if "backend_url" in spec:
                 base_url = spec["backend_url"]
-            elif provider.lower() == str(main_provider).lower():
+            elif provider_norm == main_norm:
                 base_url = self.config.get("backend_url")
             else:
                 base_url = None
@@ -368,13 +399,23 @@ class TradingAgentsGraph:
             # `reasoning_effort`、google 的 `thinking_level`、anthropic 的 `effort`
             # 都是各家私有的，塞进 qwen / glm / 自建网关的请求体里可能直接被拒。
             # 通用参数（max_tokens / callbacks 等）保留。
+            # `dict(...)` 是防御性的：下面要 pop 韧性键，同名分支直接复用引用就会
+            # 就地改掉调用方的 llm_kwargs。当前观察不到后果（主 quick/deep 两个
+            # 客户端已在本方法之前建好），留着是为了挪动建客户端顺序时不踩到。
             role_kwargs = (
-                llm_kwargs if provider.lower() == str(main_provider).lower()
+                dict(llm_kwargs) if provider_norm == main_norm
                 else {k: v for k, v in llm_kwargs.items()
                       if k not in _PROVIDER_SPECIFIC_KWARGS}
             )
+            # 超时/重试按**这个角色的** provider 重算，不沿用主 provider 的那份：
+            # 主 anthropic + bull=deepseek 时，deepseek 角色本该拿到应用层退避重试
+            # （它的 SDK 重试被我们置 0 了）；反方向则绝不能把 max_retries=0 套到
+            # anthropic 头上。两个方向都只有按目标算才对。
+            for key in _RESILIENCE_KWARGS:
+                role_kwargs.pop(key, None)
+            role_kwargs.update(self._resilience_kwargs(provider_norm))
 
-            key = (provider.lower(), spec["model"], base_url, spec.get("api_key"))
+            key = (provider_norm, spec["model"], base_url, spec.get("api_key"))
             if key not in cache:
                 client_kwargs = dict(role_kwargs)
                 if spec.get("api_key"):
@@ -393,15 +434,51 @@ class TradingAgentsGraph:
         )
         return resolved
 
+    def _resilience_kwargs(self, target_provider: Any) -> Dict[str, Any]:
+        """超时与重试参数 —— 按**目标 provider** 算，而不是按 `llm_provider`。
+
+        这份 kwargs 有三个消费方（主客户端 / 订阅降级 fallback_spec / role_llms），
+        每一个都可能指向**不同的** provider，所以判据必须跟着目标走，不能当成
+        共享字典的一个属性（三个调用点各自调本方法）。T1 移植自源仓库 0.5.19。
+
+        · `timeout` —— **所有 provider 都给**。这不是 OpenAI 专属问题：
+          langchain 的三个封装层（ChatOpenAI / ChatAnthropic / AzureChatOpenAI）
+          在用户没给超时时都把 `None` **显式**传给底层 SDK，而 httpx 收到显式
+          `None` 的语义是"不设超时"，不是"用 SDK 默认值"。实测构造出来的对象：
+              不给 timeout → client.timeout=None（无限等）
+              给 timeout=150 → client.timeout=150.0
+          所以"另几家 SDK 本来就有 600 秒读超时"是假的 —— 那是**裸 SDK** 的常量。
+        · `max_retries=0` + `app_retries` / `app_retry_delay` —— **只给走
+          OpenAIClient 的 provider**。应用层退避重试只在 NormalizedChatOpenAI 里
+          实现；给别家注入 `max_retries=0` 等于静默关掉它们 SDK 自带的重试，
+          而 `app_retries` 它们根本不读。
+        """
+        provider = str(target_provider or "").strip().lower()
+        kwargs: Dict[str, Any] = {}
+
+        timeout = self.config.get("llm_timeout")
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+
+        if provider in _OPENAI_COMPATIBLE:
+            kwargs["max_retries"] = 0
+            kwargs["app_retries"] = self.config.get("llm_max_retries", 3)
+            kwargs["app_retry_delay"] = self.config.get("llm_retry_delay", 5)
+
+        return kwargs
+
     def _get_provider_kwargs(self) -> Dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
         kwargs = {}
-        provider = self.config.get("llm_provider", "").lower()
+        provider = self.config.get("llm_provider", "").strip().lower()
 
         # 与 provider 无关：单次回复的输出上限。撞上它就是报告写一半被截断（#91）。
         max_tokens = self.config.get("max_tokens")
         if max_tokens:
             kwargs["max_tokens"] = max_tokens
+
+        # 项目级 LLM 请求超时/重试（静默卡死兜底；T1 移植自源仓库 0.5.19 / PR #100）。
+        kwargs.update(self._resilience_kwargs(provider))
 
         if provider == "google":
             thinking_level = self.config.get("google_thinking_level")

@@ -57,6 +57,19 @@ DEFAULT_CONFIG = {
     # 认不出这些模型名，会落到一个很小的兜底值，所以 anthropic 客户端对非 Claude
     # 模型自带一个更宽的默认值，见 llm_clients/anthropic_client.py。
     "max_tokens": _env_int("TRADINGAGENTS_MAX_TOKENS"),
+    # 单次 LLM 请求超时（秒）。None = 用 provider/客户端默认值。设具体值可兜底
+    # 「请求挂起导致静默卡死」——超时后由客户端抛异常，而非进程 alive 但永久无输出。
+    # 经 `_get_provider_kwargs → _PASSTHROUGH_KWARGS` 透传给 openai / anthropic 系客户端。
+    # ⚠️ 本地 fork 说明（T1 移植自源仓库 0.5.19 / PR #100）：150 是"单次 HTTP 请求"预算，
+    #   本管线由 LangGraph 逐轮驱动 ReAct 循环、每轮各拿一份完整预算；若实测单轮
+    #   deepseek-flash 耗时接近 150s，应通过 `--config-json` 调大而非改本默认值。
+    "llm_timeout": 150,
+    # 5xx（502/503 等）及读超时后的应用层重试次数。SDK 层恒 0 重试（仅限 OpenAI 兼容
+    # 客户端，见 `_resilience_kwargs`），由 `openai_client.invoke` 按下面的冷静期退避重试。
+    "llm_max_retries": 3,
+    # 重试退避的初始值（秒），指数翻倍：第 1 次重试等 5s、第 2 次 10s、第 3 次 20s...
+    # 避免对刚报错的上游立即重试造成雪崩，也避免固定间隔在持续故障时反复撞击。
+    "llm_retry_delay": 5,
     # 可选：给单个角色单独指定模型（#39）。留空 = 全部角色沿用上面的
     # quick/deep 两档，行为与以前完全一致——大多数人只有一家模型，不需要碰这里。
     #

@@ -6,6 +6,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.6.0] — 2026-09-30
+
+### Changed（版本号跳段：与源仓库 simonlin1212/TradingAgents-astock 的分叉显式化）
+
+本仓与源仓库 `simonlin1212/TradingAgents-astock`（下称"源仓库"）自共同祖先 `v0.5.16`
+（`4b9d16f`，2026-09-02）起**双向分叉**：本仓 40 个提交、源仓库 25 个提交。
+两侧都使用过 `0.5.17`—`0.5.20` 这四个版本号但**内容不同**（本仓 09-02~09-05；源仓库 09-05~09-21），
+而下游深研用 headless JSON 的 `ta_version` 做**缓存失效握手** —— 同号不同内容会让已落盘的
+`deep_*.json` 来源不可判。故版本号跳段至 `0.6.0`，退出与源仓库重叠的 `0.5.x` 号段；
+后续移植项按批次递增。**本次跳段不改动任何业务逻辑**（五处载体同步，`test_version_consistency` 锁定）。
+
+### Added（T1 移植：源仓库 0.5.19 / PR #100 —— LLM 调用级超时与应用层重试）
+
+来源提交：`9782a1f` + `dd35ce2`(#100) + `7747b6d`(v0.5.19) + `922db59`(#113)，见
+`A股Skill2.0新架构实施方案_20260930.md` §4.7 移植清单 A1/A2。
+
+**动因**：本仓此前只有**进程/票级**防线（深研 wrapper 单票 3000s + 进程组回收），**缺调用级界**。
+langchain 封装层在调用方未给 timeout 时会把 `None` **显式**传给底层 SDK，而 httpx 收到显式
+`None` 的语义是**永不超时** —— 网关挂起时节点不是"等得久"，是**永远不返回**（进程 alive、零输出）。
+
+- `default_config.py`：新增 `llm_timeout: 150` / `llm_max_retries: 3` / `llm_retry_delay: 5`。
+  ⚠️ `llm_timeout` 是"**单次 HTTP 请求**"预算（本管线由 LangGraph 逐轮驱动 ReAct 循环、每轮各拿
+  一份完整预算）。**首次灰度应先经 `--config-json` 按实测量调参**（确认 deepseek-flash 单轮耗时
+  安全）再固化，勿直接依赖该默认值。
+- `graph/trading_graph.py`：新增 `_resilience_kwargs(target_provider)` —— 超时/重试按**目标
+  provider** 计算（`timeout` 给所有 provider；`max_retries=0` + `app_retries`/`app_retry_delay`
+  只给走 `OpenAIClient` 的 provider），三个消费方各自调用：
+  ① 主客户端（`_get_provider_kwargs`）；② 订阅降级 `fallback_spec`（按 `_fb_effective` 算，
+  并给 `claude_agent_sdk` **主路径**单独补 `timeout` —— 它不走 LangChain，罩不到那份 timeout）；
+  ③ `role_llms` 的每个角色（先剔除继承来的 `_RESILIENCE_KWARGS` 再按自己的 provider 重算）。
+  另：`provider` 比较一律 `strip().lower()`（配成 `"DeepSeek"` 时**同一家**会被判成跨厂商、
+  `backend_url` 被丢弃 → 降级请求发去官方端点用自建网关 key 认证 = 401）。
+- `llm_clients/openai_client.py`：应用层重试，**覆盖 SDK 原本会重试的那一套**（408 / 409 / 429 /
+  ≥500 / 连接类；400/401/404 仍第一次就抛，不让用户干等三轮退避）；模块级 `_is_retryable()` +
+  `_RETRY_STATUS_CODES`；指数退避 5s→10s→20s；`app_retries` 夹到非负（防 `-1` 语义导致循环零次）；
+  流式 `stream_usage` 纳入透传（否则流式路径 token 统计**静默归零**）；
+  `DeepSeekChatOpenAI._convert_chunk_to_generation_chunk`（流式 reasoning_content 回传，
+  保 DeepSeek 思考模式的下一轮 round-trip）；opencode.ai 网关自动开流式保活（本地生产不经过该
+  网关，属保值移植，避免再次分叉）。
+- `llm_clients/factory.py`：`provider.strip().lower()` 作为**唯一**归一化边界。
+
+### Tests
+
+新增/迁移 **55 例**，全部不碰真实 provider（无网络、无子进程、无订阅额度）：
+
+- 新增 `tests/test_llm_timeout.py`（**50 例**，源仓库同名文件逐字迁移，本地**未改一行即通过**）：
+  透传键存在性、按目标 provider 计算、408/409/429/≥500/连接类可重试与 400/401/404 首次即抛、
+  指数退避序列、`app_retries < 0` 不返回 None、降级与 `role_llms` 三方判据、provider 拼写变体
+  归一化、流式 `stream_usage` 开关、默认配置三键。
+- `tests/test_openai_compatible_provider.py`（**+5 例**，并入源仓库 #100 增量）：
+  opencode 网关 streaming + DeepSeek 子类选择；非 opencode base_url 不开流式；流式 chunk 的
+  reasoning_content 捕获与"无 reasoning 不写键"。
+
+**本机实测**：`python -m pytest -q --ignore=tests/test_cli_default_command.py
+--ignore=tests/test_ticker_symbol_handling.py` → **737 passed / 13 skipped / 0 failed**
+（其中 50 例来自新迁移的 `test_llm_timeout.py`、5 例来自 `test_openai_compatible_provider.py` 增量）。
+
 ## [0.5.42] — 2026-09-29
 
 ### Fixed（B17 阈值单源）+ Added（B10 时区白名单守卫、B9 反向对照）
