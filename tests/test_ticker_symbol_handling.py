@@ -2,6 +2,10 @@ import unittest
 
 import pytest
 
+# B1（2026-09-30）：`cli.*` 依赖 questionary/prompt_toolkit；缺该可选依赖时**跳过本文件**
+# 而不是在收集期报 ModuleNotFoundError（后者会让裸跑 `pytest` 整体中断）。
+pytest.importorskip("questionary", reason="CLI 可选依赖 questionary 未安装")
+
 from cli.utils import normalize_ticker_symbol
 from tradingagents.agents.utils.agent_utils import build_instrument_context
 

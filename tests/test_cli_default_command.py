@@ -6,7 +6,12 @@ Typer 在只注册一个命令时用"单命令模式"，裸跑就等于跑那个
 """
 import inspect
 
+import pytest
 from typer.testing import CliRunner
+
+# B1（2026-09-30）：`cli.*` 依赖 questionary/prompt_toolkit；缺该可选依赖时**跳过本文件**
+# 而不是在收集期报 ModuleNotFoundError（后者会让裸跑 `pytest` 整体中断，且迫使人记住 --ignore）。
+pytest.importorskip("questionary", reason="CLI 可选依赖 questionary 未安装")
 
 from cli.main import app
 
