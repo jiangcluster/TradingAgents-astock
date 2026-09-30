@@ -6,6 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.6.4] — 2026-09-30
+
+### Changed（T6 移植：源仓库 0.5.18 —— 辩论历史滚动窗口压缩 + last-arg 注入去重）
+
+来源提交：`f9b5946`（新增 `context.py`）+ `13a9a21`（去重并接入）+ 合并 `ec78d70`(#109)，
+见 `A股Skill2.0新架构实施方案_20260930.md` §4.7 移植清单 B6。
+
+**动因**：多空 / 风险辩手每轮既注入**完整** `history`，**又单独注入一次 `current_response`**
+—— 而后者恰是 `history` 的最后一条发言。结果是**最新发言被重复注入**，且注入 token 随
+辩论轮数**平方增长**。
+
+- 新增 `tradingagents/agents/utils/context.py`（源仓库逐字）：
+  `compact_history(history, max_turns=4)` —— 发言数 ≤ `max_turns` 时**原样返回**
+  （默认配置下不触发：多空各 1 轮 = 2 条、风险各 1 轮 = 3 条）；超过则保留最近 `max_turns`
+  条全文，更早的每条压成「角色: 首句要点」一行（首句截断 120 字符），并加
+  `[早期论点摘要]` / `[近期完整辩论]` 两段标记。
+- 5 个辩手节点同步改造（**人工合并**；本次只动"**注入什么**"，不动"**谁先发言**"与
+  输出语言 —— 与本地 0.5.32「空方开场 / 多方收尾」、0.5.29「辩论语言纳入
+  `output_language`」互不冲突）：
+  - `researchers/bull_researcher.py` / `bear_researcher.py`：删除 `current_response` 读取与
+    `Last X argument:` 行 → `Conversation history of the debate: {compact_history(history)}`；
+  - `risk_mgmt/aggressive|conservative|neutral_debator.py`：删除
+    `current_aggressive/conservative/neutral_response` 读取与 `Last X argument:` 片段 →
+    `Conversation history: {compact_history(history)}`；
+  - 节点**写回** `current_*_response` 的行为**保持不变**（只去掉重复的**读取**）。
+- 迁移 `tests/test_context_compaction.py`（**9 例**，源仓库逐字，本地零修改通过）。
+
+**本机实测**：全量 → **796 passed / 13 skipped / 0 failed**（较上一版 787 增 9 例）。
+
 ## [0.6.3] — 2026-09-30
 
 ### Added（T4 移植：源仓库 0.5.18 —— 缺失数据任务追踪，仅 TA 内部；按决策 X1-a）
