@@ -25,6 +25,11 @@ Breaking changes within the 0.x line are called out explicitly.
 | 股权质押 | 未接 | 东财 datacenter `RPT_CSDC_LIST` |
 
 - `dataflows/a_stock.py`：
+  - **修前置 bug（不修则上面两条都无效）**：`get_fund_flow` 的**实时段没有自己的 try**——
+    本网络 push2 恒被拦时抛 `RemoteDisconnected` 并冒泡到函数最外层 except，把**整段输出**
+    替换成 `Error fetching fund flow …` ⇒ 历史段（含新浪备源）**根本执行不到**，资金流工具
+    在本网络等于整体不可用。现实时段单独兜底，失败时输出 `[数据缺失: 实时资金流]` 并
+    **明确区分于「非交易时段」**，历史段照常产出。
   - 新增 `_sina_fund_flow_history()`（并入 `get_fund_flow` 的合并序列，**同日期东财优先**）；
     新浪只提供主力净额、**无四档拆分** → 那四列留空渲染为 `—`（**不得当 0**），
     并在输出里**披露来源**与口径差异。
@@ -62,14 +67,18 @@ Breaking changes within the 0.x line are called out explicitly.
 - **龙虎榜席位明细**：**已实现**（`RPT_BILLBOARD_DAILYDETAILSBUY/SELL` 早已在用）——
   报告里的那类"缺失"是**该股近 30 日确实未上榜**（002833 最近一次为 2023-02-22），属**事实性**。
 
-**测试**（新增 18 例）：`tests/test_astock_multisource_068.py`（新增，18 例：新浪资金流解析/截断/
-异常/空、接入与来源披露、新浪行业 **单位回归**（`-1.667` 不得变 `-166.7`）/短行跳过/异常、
-`_render_sina_industry` 成功与失败两态、主要财务指标（含扣非）/None→`—`/空、分红比例×100、
-质押空→`[]` 与"单位未核实字段不输出"、不可得源纪律注入、门控词表含停更标记、北向失败路径带声明）；
+**测试**（新增 19 例）：`tests/test_astock_multisource_068.py`（新增，19 例：新浪资金流解析/截断/
+异常/空、接入与来源披露、**实时段失败不得拖垮历史段**、新浪行业 **单位回归**
+（`-1.667` 不得变 `-166.7`）/短行跳过/异常、`_render_sina_industry` 成功与失败两态、
+主要财务指标（含扣非）/None→`—`/空、分红比例×100、质押空→`[]` 与"单位未核实字段不输出"、
+不可得源纪律注入、门控词表含停更标记、北向失败路径带声明）；
 另更新 4 个既有用例把新备源 stub 掉以保持无网络（`test_astock_fund_flow_cache` ×3、
 `test_lookahead_guard` ×1、`test_astock_p0p1_fixes` ×2）。
 
-**本机实测**：全量 → **845 passed / 15 skipped / 0 failed**（较上一版 827 增 18 例）。
+**本机实测**：全量 → **846 passed / 15 skipped / 0 failed**（较上一版 827 增 19 例）。
+**服务器实测**：全量 **820 passed / 18 skipped / 0 failed**；数据层实跑 002833 ——
+新浪资金流（历史序列 + 来源披露）、新浪行业（涨跌幅 -1.91%~2.16%，量级正常）、
+官方扣非科目、分红送配、股权质押、东财快讯、北向停更声明**全部到位**。
 
 ## [0.6.7] — 2026-09-30
 

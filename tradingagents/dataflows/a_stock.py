@@ -3296,10 +3296,19 @@ def get_fund_flow(
             "fields2": "f51,f52,f53,f54,f55,f56,f57",
         }
         klines = []
+        rt_error = ""
         if not historical:
-            r = _em_get(url_rt, params=params_rt, timeout=10)
-            d = r.json()
-            klines = d.get("data", {}).get("klines", [])
+            # 0.6.8：实时段**单独兜底**。本网络 push2 被应用层拦截时 `_em_get` 直接抛
+            # RemoteDisconnected；此前该异常冒泡到函数最外层 except，把**整段输出**替换成
+            # `Error fetching fund flow …` ⇒ 连历史段（含新浪备源）都执行不到，
+            # 资金流工具在本网络等于完全不可用（而不是"缺实时、有历史"）。
+            try:
+                r = _em_get(url_rt, params=params_rt, timeout=10)
+                d = r.json()
+                klines = d.get("data", {}).get("klines", [])
+            except Exception as rt_err:  # noqa: BLE001 —— 实时失败不得拖垮历史段
+                rt_error = f"{type(rt_err).__name__}: {rt_err}"
+                logger.warning("realtime fund flow failed for %s: %s", code, rt_err)
 
         if klines:
             lines.append(
@@ -3349,6 +3358,12 @@ def get_fund_flow(
                     logger.warning(
                         "fund flow cache write failed for %s: %s", code, save_err
                     )
+        elif rt_error:
+            # 与"非交易时段"严格区分：把取数故障写成后者会被读成"盘中再看就有"
+            lines.append(
+                f"[数据缺失: 实时资金流] 实时分钟级取数失败（{rt_error}）——"
+                f"这**不是**「非交易时段」；下方历史日级数据不受影响。"
+            )
         else:
             lines.append(
                 "No realtime fund flow (non-trading hours or holiday)"

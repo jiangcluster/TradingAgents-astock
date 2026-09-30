@@ -89,6 +89,32 @@ def test_sina_fund_flow_empty_payload_is_empty_dict(monkeypatch):
     assert a_stock._sina_fund_flow_history("002833") == {}
 
 
+def test_realtime_failure_does_not_kill_history_section(monkeypatch, tmp_path):
+    """实时段失败**不得**把整段输出变成 `Error fetching fund flow …`。
+
+    修复前的实际形态：本网络 push2 恒被拦 → 实时调用抛 RemoteDisconnected → 冒泡到
+    函数最外层 except ⇒ 历史段（含新浪备源）**根本执行不到**，资金流工具整体不可用。
+    """
+    monkeypatch.setattr(
+        a_stock, "_fund_flow_cache_path", lambda: str(tmp_path / "ff.csv"))
+    monkeypatch.setattr(a_stock, "_is_historical", lambda d: False)
+    monkeypatch.setattr(a_stock, "_market_today",
+                        lambda: __import__("datetime").date(2026, 9, 30))
+    monkeypatch.setattr(
+        a_stock, "_em_get",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("RemoteDisconnected")))
+    monkeypatch.setattr(
+        a_stock, "_sina_fund_flow_history",
+        lambda *a, **k: {"2026-09-30": ["2026-09-30", "-22789994.86", "", "", "", ""]})
+
+    text = a_stock.get_fund_flow("002833", "2026-09-30")
+
+    assert "Error fetching fund flow" not in text
+    assert "[数据缺失: 实时资金流]" in text
+    assert "不是**「非交易时段」" in text          # 故障不得写成"非交易时段"
+    assert "数据来源：新浪 MoneyFlow 1 天" in text
+
+
 def test_fund_flow_falls_back_to_sina_and_discloses_source(monkeypatch, tmp_path):
     """东财历史为空 → 用新浪补齐，且**必须披露来源**与四档不可得的限制。"""
     monkeypatch.setattr(
