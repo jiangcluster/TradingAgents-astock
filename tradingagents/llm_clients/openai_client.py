@@ -231,8 +231,13 @@ _PASSTHROUGH_KWARGS = (
 _PROVIDER_CONFIG = {
     "xai": ("https://api.x.ai/v1", "XAI_API_KEY"),
     "deepseek": ("https://api.deepseek.com", "DEEPSEEK_API_KEY"),
-    "qwen": ("https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY"),
-    "glm": ("https://api.z.ai/api/paas/v4/", "ZHIPU_API_KEY"),
+    # qwen / glm 统一到**国内站**（与 cli/utils.py::select_llm_provider 的 PROVIDERS 逐字一致，
+    # 守卫见 tests/test_provider_endpoint_consistency.py）。此前这两行是海外站
+    # （dashscope-intl / api.z.ai），于是从 CLI 跑走国内站、从 Web 跑（侧栏 Base URL 留空时
+    # 走本兜底）走海外站 —— 两站同一把 key 都能用、都返回同一份模型列表，所以**不报错**，
+    # 静默换网络路径。源仓库 simonlin1212/TradingAgents-astock 于 922db59(#113) 修复，本仓 0.6.6 移植。
+    "qwen": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY"),
+    "glm": ("https://open.bigmodel.cn/api/paas/v4/", "ZHIPU_API_KEY"),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
     "ollama": ("http://localhost:11434/v1", None),
     "minimax": ("https://api.minimax.chat/v1", "MINIMAX_API_KEY"),

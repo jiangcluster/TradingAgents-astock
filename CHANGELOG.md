@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.6.6] — 2026-09-30
+
+### Fixed（T8 移植：源仓库 `922db59` / #113 —— CLI 与客户端兜底端点分裂）
+
+来源提交：`922db59`(#113)，见 `A股Skill2.0新架构实施方案_20260930.md` §4.7 移植清单 A2。
+
+**动因**：`_PROVIDER_CONFIG`（客户端兜底，Web 侧栏 Base URL 留空时生效）与
+`cli/utils.py::select_llm_provider()` 的 `PROVIDERS` 是**两处独立字面量**，自 v0.2.4 起对
+`qwen` / `glm` 就没对齐 —— CLI 走国内站（`dashscope.aliyuncs.com` / `open.bigmodel.cn`），
+兜底走海外站（`dashscope-intl` / `api.z.ai`）。两站同一把 key 都能用、都返回同一份模型列表，
+所以**不报错**，只是换个入口就静默换网络路径。
+
+> **为何迟到**：该修复原被登记为「已随 T1 移植」，实测未做 —— T1 提交（`cfcd0ba`）未触碰
+> 端点两行，`922db59` 亦不在本仓历史（`git merge-base --is-ancestor` 为否）。0.6.5 复核时
+> 发现并回正台账（见 `CHANGES_FROM_UPSTREAM.md` 移植台账），本版补齐代码。
+
+- `llm_clients/openai_client.py`：`qwen` / `glm` 兜底端点统一到**国内站**（与 CLI 侧逐字一致）。
+- `tests/test_provider_endpoint_consistency.py`（**新增 3 例**）：
+  - `test_cli_and_client_fallback_agree_on_endpoints`：两处共有的 provider 集合必须**恰好等于**
+    `_MUST_AGREE`（不是"非空"—— 只判非空的话，某一侧漏写一个 provider 或正则漏解析一行，
+    会让它悄悄退出比对范围而测试照样绿，那正是本条要防的失效模式），且端点逐字相等；
+  - `test_domestic_providers_point_to_domestic_sites`：`glm` / `qwen` 兜底不得回到海外站；
+  - `test_guard_catches_fabricated_divergence`：**反向对照** —— 伪造一个海外站 qwen 端点必须被判出。
+
+> **与源仓库实现的两处差异（有意，非疏漏）**：
+> ① 只读 `cli/utils.py` **文件文本**，不用 `inspect.getsource` —— 后者需 `import cli.utils`，
+> 而该模块顶层 `import questionary`（→ `prompt_toolkit`），缺该可选依赖时只能靠
+> `pytest.importorskip` 跳过，会让守卫在缺依赖环境里**静默失效**（本仓已有同类先例）；
+> ② 补反向对照（源仓库两条均为正向断言），对齐本仓 §7「守卫不得空转」的要求。
+
+**本机实测**：全量 → **805 passed / 13 skipped / 0 failed**（较上一版 802 增 3 例）。
+
+### Docs
+
+- `CHANGES_FROM_UPSTREAM.md`：移植台账 A2 由「⚠️ 待补」改为「✅ 已移植」，统计回正为
+  **25/25 已处置完毕**。
+- `A股Skill2.0新架构实施方案_20260930.md`：§4.7.1 / §4.7.3 / §4.7.4 同步（剩余待办 → 无）。
+
 ## [0.6.5] — 2026-09-30
 
 ### Added / Changed（T7：T4 + B4 —— 缺失数据缺口透出 + 报告「数据不完整」警告）
