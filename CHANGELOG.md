@@ -6,6 +6,50 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.6.3] — 2026-09-30
+
+### Added（T4 移植：源仓库 0.5.18 —— 缺失数据任务追踪，仅 TA 内部；按决策 X1-a）
+
+来源提交：`2dad8af`（+ 合并 `fbb268d`(#107)），见
+`A股Skill2.0新架构实施方案_20260930.md` §4.7 移植清单 B3。
+**按决策 X1-a：只移植 TA 内部追踪，不动 web 面板**（`web/components/report_viewer.py` 与
+`web/pdf_export.py` 的 B4「导出不完整告警」一并暂缓）。
+
+- 新增 `tradingagents/dataflows/missing_data.py`（源仓库逐字移植）：把工具调用中
+  **报错或返回部分数据**的那些登记为"缺失数据任务"（索引
+  `~/.tradingagents/missing_data_tasks.json` + 输出缓存 `missing_data_cache/`），
+  支持后续按任务重试与复盘；提供 `make_tool_call_recorder(stage)`（供 ToolNode 挂钩）、
+  `reset_missing_tasks_for_run` / `attach_missing_data_snapshot` /
+  `mark_resolved_tasks_consumed`（同一轮运行的首尾调用）。
+- `graph/trading_graph.py`：7 个 `ToolNode` 全部加
+  `wrap_tool_call=make_tool_call_recorder("<role>")`；`_run_graph` 起点重置当轮任务；
+  `finalize_graph_run` 收尾落快照并标记已消费；`_log_state` 新增 4 个键
+  （`missing_data_tasks` / `missing_data_complete` / `missing_data_requires_reanalysis` /
+  `missing_data_updated_at`，全部 `.get()` 兜底，不破坏既有键）。
+- `tests/test_sentiment_data_tools.py`：`social` ToolNode 的源码正则同步放宽，以匹配
+  新增的 `wrap_tool_call=` 参数（源仓库同款改动）。
+
+### Tests / 测试隔离
+
+- 迁移 `tests/test_missing_data_tasks.py`（**12 例**，源仓库逐字，自带 `monkeypatch`
+  把索引/缓存指向 `tmp_path`）。
+- **新增 autouse 隔离 fixture** `tests/conftest.py::_isolated_missing_data_index`：
+  把模块级 `_MISSING_DATA_TASKS_FILE` / `_MISSING_DATA_CACHE_DIR` 重定向到 `tmp_path`
+  并清 `_INDEX_CACHE`。**动因（本机实测）**：该模块路径**硬编码**在 `~/.tradingagents/`，
+  跑**完整管线**的既有用例（`test_memory_log::test_full_pipeline_no_regression`、
+  `test_checkpoint_resume::test_config_change_does_not_resume_stale_checkpoint`）会在
+  `finalize_graph_run` 阶段写开发者的真实 HOME → 沙箱/权限拒绝时直接 `PermissionError`，
+  并在 HOME 留下残留。与既有 `_isolated_local_caches` **同因同型**。
+
+**本机实测**：全量 → **787 passed / 13 skipped / 0 failed**（较上一版 775 增 12 例）。
+
+> **T4 遗留观察（需你决策，当前**不**额外接线）**：本仓生产路径是 **headless**
+> （`persist_state_log=False`、`results_dir` 落 tmp），而 `missing_data` 的索引路径
+> **不可配置**、恒写 `~/.tradingagents/`；且 X1-a 不动 web 面板，意味着**目前没有任何
+> 消费方**（TA 侧那 4 个快照键只进 `_log_state`，headless 下不落盘）。
+> 是否把 `missing_data_tasks` / `missing_data_complete` 接入 headless 的 `analysis_detail`
+> （让深研摘要能消费），需另行决策。
+
 ## [0.6.2] — 2026-09-30
 
 ### Fixed（T3 移植：源仓库 2026-09-16 —— 概念板块 403 谎报 / 一致预期 pandas 3.x）

@@ -52,6 +52,29 @@ def _isolated_local_caches(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_missing_data_index(monkeypatch, tmp_path):
+    """把「缺失数据任务」索引与缓存重定向到临时目录（T4 移植 missing_data）。
+
+    与 `_isolated_local_caches` 同因：`missing_data` 的索引/缓存路径硬编码在
+    `~/.tradingagents/` 下，任何跑**完整管线**的用例（如 `test_memory_log` /
+    `test_checkpoint_resume`）在 `finalize_graph_run` 阶段都会去写开发者的真实 HOME；
+    在原子替换被沙箱或权限拒绝时直接 `PermissionError`（本机实测 2 例），
+    并在 HOME 留下残留文件。测试内显式 patch 仍然优先。
+    """
+    from tradingagents.dataflows import missing_data
+
+    monkeypatch.setattr(
+        missing_data, "_MISSING_DATA_TASKS_FILE", tmp_path / "missing_data_tasks.json"
+    )
+    monkeypatch.setattr(
+        missing_data, "_MISSING_DATA_CACHE_DIR", tmp_path / "missing_data_cache"
+    )
+    missing_data._INDEX_CACHE.clear()
+    yield
+    missing_data._INDEX_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
 def _reset_em_breaker():
     """重置东财行情集群熔断状态（0.5.27）。
 
