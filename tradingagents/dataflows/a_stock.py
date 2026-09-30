@@ -897,6 +897,128 @@ def _datacenter_holder_sections(code: str) -> list:
                 f"{_fmt_num(r.get('HOLD_RATIO'))} | {_fmt_num(r.get('TRADE_AVERAGE_PRICE'))}"
             )
 
+    lines.extend(_datacenter_dividend_section(code))
+    lines.extend(_datacenter_pledge_section(code))
+
+    return lines
+
+
+# 分红送配（0.6.8）—— 补「官方每股派息口径 / 历年分红」两类长期缺失（解禁维的
+# 「分红不达标」核查与基本面维的派息口径都要用它）。单位按线上实测核对：
+#   PRETAX_BONUS_RMB = **每 10 股派息(元，含税)**（实测 3 与方案原文「10派3.00元(含税)"一致）
+#   DIVIDENT_RATIO   = **小数比例**（实测 0.0158646 → 1.59%）⇒ 渲染时必须 ×100
+#   IMPL_PLAN_PROFILE = 方案原文（最可靠，直接呈现，不做二次推断）
+def _datacenter_dividend_section(code: str) -> list:
+    rows = _eastmoney_datacenter(
+        "RPT_SHAREBONUS_DET",
+        columns=("REPORT_DATE,PRETAX_BONUS_RMB,DIVIDENT_RATIO,EX_DIVIDEND_DATE,"
+                 "EQUITY_RECORD_DATE,ASSIGN_PROGRESS,IMPL_PLAN_PROFILE"),
+        filter_str=f'(SECURITY_CODE="{code}")', page_size=6,
+        sort_columns="REPORT_DATE", sort_types="-1",
+    )
+    if not rows:
+        return []
+    lines = ["\n## 分红送配（东财 datacenter · 官方口径）"]
+    lines.append("报告期 | 方案原文 | 每10股派息(元,含税) | 股息率% | 除权除息日 | 股权登记日 | 进度")
+    for r in rows[:6]:
+        ratio = r.get("DIVIDENT_RATIO")
+        try:
+            ratio_txt = f"{float(ratio) * 100:.2f}" if ratio is not None else "—"
+        except (TypeError, ValueError):
+            ratio_txt = "—"
+        lines.append(
+            f"  {str(r.get('REPORT_DATE') or '')[:10]} | {r.get('IMPL_PLAN_PROFILE') or '—'} "
+            f"| {_fmt_num(r.get('PRETAX_BONUS_RMB'))} | {ratio_txt} "
+            f"| {str(r.get('EX_DIVIDEND_DATE') or '')[:10] or '—'} "
+            f"| {str(r.get('EQUITY_RECORD_DATE') or '')[:10] or '—'} "
+            f"| {r.get('ASSIGN_PROGRESS') or '—'}"
+        )
+    lines.append(
+        "（口径：`股息率%` 由线上 `DIVIDENT_RATIO` 比例换算；方案以「方案原文」为准。）"
+    )
+    return lines
+
+
+# 股权质押（0.6.8）—— 补「质押」缺失（解禁/减持维的尾部风险核查）。
+# ⚠️ 只渲染**单位已核实**的字段：TRADE_DATE（最近质押日）、PLEDGE_RATIO（%）、
+# PLEDGE_DEAL_NUM（笔）。`PLEDGE_MARKET_CAP` / `REPURCHASE_BALANCE` 的单位在线上
+# **未经核实**（按数值量级推定为万元/万股，但未证实），为避免下游误读**不予输出**。
+def _datacenter_pledge_section(code: str) -> list:
+    rows = _eastmoney_datacenter(
+        "RPT_CSDC_LIST",
+        columns="TRADE_DATE,PLEDGE_RATIO,PLEDGE_DEAL_NUM,PAYYEAR",
+        filter_str=f'(SECURITY_CODE="{code}")', page_size=5,
+        sort_columns="TRADE_DATE", sort_types="-1",
+    )
+    # ⚠️ 无记录时返回 `[]`（**不得**返回"无质押"文案）：调用方
+    # `get_insider_transactions` 以 `if sections:` 决定是否回退 mootdx F10，恒非空
+    # 会让该回退变成死代码，并在 datacenter 全空时返回一份近乎空白的报告。
+    if not rows:
+        return []
+    lines = ["\n## 股权质押（东财 datacenter · 最近记录）"]
+    lines.append("质押日期 | 质押比例% | 质押笔数")
+    for r in rows[:5]:
+        lines.append(
+            f"  {str(r.get('TRADE_DATE') or '')[:10]} | "
+            f"{_fmt_num(r.get('PLEDGE_RATIO'))} | {r.get('PLEDGE_DEAL_NUM') or '—'}"
+        )
+    lines.append(
+        "  注：以上为**最近 5 条历史记录**；最新日期距今天较远即表示近期无新增质押。"
+        "金额与股数类字段的单位未经线上核实，为避免误读未输出。"
+    )
+    return lines
+
+
+# 主要财务指标（0.6.8）—— 补「官方扣非净利润科目」长期缺失（基本面维必采项）。
+# 列名与单位按线上实测逐字核对（002833 / 2026中报）：
+#   TOTALOPERATEREVE=1.5033e9 元、KCFJCXSYJLR=2.3350e8 元 ⇒ **金额单位=元**
+#   TOTALOPERATEREVETZ=21.75、ROEJQ=8.52、XSMLL=33.02 ⇒ **比率单位=百分数**
+_MAIN_FIN_ROWS = (
+    ("营业总收入(亿元)", "TOTALOPERATEREVE", 1e8),
+    ("营收同比(%)", "TOTALOPERATEREVETZ", None),
+    ("归母净利(亿元)", "PARENTNETPROFIT", 1e8),
+    ("归母同比(%)", "PARENTNETPROFITTZ", None),
+    ("扣非归母净利(亿元)", "KCFJCXSYJLR", 1e8),
+    ("扣非同比(%)", "KCFJCXSYJLRTZ", None),
+    ("ROE加权(%)", "ROEJQ", None),
+    ("扣非ROE加权(%)", "ROEKCJQ", None),
+    ("毛利率(%)", "XSMLL", None),
+    ("净利率(%)", "XSJLL", None),
+    ("基本EPS(元)", "EPSJB", None),
+    ("资产负债率(%)", "ZCFZL", None),
+)
+
+
+def _datacenter_main_financial_section(code: str) -> list:
+    """官方口径**主要财务指标（含扣非）**，转置成「指标 × 最近 2 期」表格。"""
+    suffix = {"sh": "SH", "sz": "SZ", "bj": "BJ"}.get(_get_prefix(code), "SZ")
+    rows = _eastmoney_datacenter(
+        "RPT_F10_FINANCE_MAINFINADATA",
+        columns="REPORT_DATE_NAME," + ",".join(c for _, c, _ in _MAIN_FIN_ROWS),
+        filter_str=f'(SECUCODE="{code}.{suffix}")', page_size=2,
+        sort_columns="REPORT_DATE", sort_types="-1",
+    )
+    if not rows:
+        return []
+    periods = [str(r.get("REPORT_DATE_NAME") or "—") for r in rows]
+    lines = ["\n## 主要财务指标（东财 datacenter · 官方口径，含**扣非**）"]
+    lines.append("指标 | " + " | ".join(periods))
+    for label, col, scale in _MAIN_FIN_ROWS:
+        cells = []
+        for r in rows:
+            raw = r.get(col)
+            if raw is None:
+                cells.append("—")
+                continue
+            try:
+                cells.append(_fmt_num(float(raw) / scale) if scale else _fmt_num(raw))
+            except (TypeError, ValueError):
+                cells.append("—")
+        lines.append(f"{label} | " + " | ".join(cells))
+    lines.append(
+        "（来源：东财 datacenter `RPT_F10_FINANCE_MAINFINADATA`；金额已换算为亿元，"
+        "比率为百分数原值。**该表为法定披露口径**，与推算值不同，已在存在口径冲突时优先采信。）"
+    )
     return lines
 
 
@@ -1693,6 +1815,14 @@ def get_fundamentals(
         except Exception as e:
             logger.warning("Consensus EPS forecast failed for %s: %s", code, e)
 
+        # 官方口径主要财务指标（含**扣非**，0.6.8）：此前该科目在本网络长期不可得，
+        # 基本面维只能标注 [数据缺失: 官方扣非净利润科目]。datacenter 为 HTTPS，
+        # 与龙虎榜/解禁/股东同源且线上实测可用。
+        try:
+            lines.extend(_datacenter_main_financial_section(code))
+        except Exception as e:  # noqa: BLE001 —— 补数失败不得让基本面工具整体失败
+            logger.warning("datacenter main financials failed for %s: %s", code, e)
+
         if not lines:
             return f"No fundamentals data found for A-stock '{code}'"
 
@@ -2112,6 +2242,11 @@ def get_news(
 
 # ---- 8. get_global_news ----
 
+# 财联社端点已被证实不可用（2026-09-30 实测：`nodeapi/telegraphList` → HTML 404；
+# `v1/roll/get_roll_list` → `errno 10012 签名错误`）。东财快讯已作为主力源，
+# 财联社降为"东财为空时补位"，且失败**只告警一次**（避免每次调用刷同一条 warning）。
+_CLS_UNAVAILABLE_WARNED = [False]
+
 
 def get_global_news(
     curr_date: Annotated[str, "Current date yyyy-mm-dd"],
@@ -2126,34 +2261,11 @@ def get_global_news(
 
     all_news: list[dict] = []
 
-    # Source 1: CLS wire (财联社快讯) — direct HTTP
-    try:
-        cls_url = "https://www.cls.cn/nodeapi/telegraphList"
-        cls_params = {"rn": str(limit), "page": "1"}
-        cls_headers = {"User-Agent": _UA, "Referer": "https://www.cls.cn/"}
-        r_cls = _requests.get(cls_url, params=cls_params, headers=cls_headers, timeout=10)
-        d_cls = r_cls.json()
-        for item in d_cls.get("data", {}).get("roll_data", []):
-            title = item.get("title", "") or item.get("brief", "")
-            content = item.get("content", "") or item.get("brief", "")
-            ctime = item.get("ctime", "")
-            # ctime is unix timestamp
-            pub_time = ""
-            if ctime:
-                try:
-                    pub_time = datetime.fromtimestamp(int(ctime)).strftime("%Y-%m-%d %H:%M")
-                except (ValueError, TypeError, OSError):
-                    pub_time = str(ctime)
-            all_news.append({
-                "title": title,
-                "content": content,
-                "time": pub_time,
-                "source": "CLS Wire",
-            })
-    except Exception as e:
-        logger.warning("CLS news fetch failed: %s", e)
-
-    # Source 2: Eastmoney global (东财7x24资讯) — direct HTTP
+    # Source 1: Eastmoney 7x24（东财快讯）— direct HTTP。
+    # 0.6.8：与财联社**对调顺序**并把财联社降为可选补齐。实测（2026-09-30，A 股服务器）：
+    # 财联社 `nodeapi/telegraphList` 已返回 HTML **404**（路径下线），现行
+    # `v1/roll/get_roll_list` 返回 `{"errno":"10012","msg":"签名错误"}`（需签名）⇒
+    # 该源在本网络**实际不可用**；而东财快讯稳定可用（np-weblist 不在被拦的 push2 集群内）。
     try:
         em_url = "https://np-weblist.eastmoney.com/comm/web/getFastNewsList"
         em_params = {
@@ -2179,6 +2291,41 @@ def get_global_news(
             })
     except Exception as e:
         logger.warning("Eastmoney global news fetch failed: %s", e)
+
+    # Source 2: CLS wire（财联社快讯）—— **仅在东财为空时补位**；失败只告警一次。
+    # 该端点已下线/需签名（见上），每次调用都试 + 每次都刷 warning 属纯噪声与无效请求。
+    if not all_news:
+        try:
+            cls_url = "https://www.cls.cn/nodeapi/telegraphList"
+            cls_params = {"rn": str(limit), "page": "1"}
+            cls_headers = {"User-Agent": _UA, "Referer": "https://www.cls.cn/"}
+            r_cls = _requests.get(
+                cls_url, params=cls_params, headers=cls_headers, timeout=10)
+            d_cls = r_cls.json()
+            for item in d_cls.get("data", {}).get("roll_data", []):
+                title = item.get("title", "") or item.get("brief", "")
+                content = item.get("content", "") or item.get("brief", "")
+                ctime = item.get("ctime", "")
+                # ctime is unix timestamp
+                pub_time = ""
+                if ctime:
+                    try:
+                        pub_time = datetime.fromtimestamp(int(ctime)).strftime("%Y-%m-%d %H:%M")
+                    except (ValueError, TypeError, OSError):
+                        pub_time = str(ctime)
+                all_news.append({
+                    "title": title,
+                    "content": content,
+                    "time": pub_time,
+                    "source": "CLS Wire",
+                })
+        except Exception as e:
+            if not _CLS_UNAVAILABLE_WARNED[0]:
+                _CLS_UNAVAILABLE_WARNED[0] = True
+                logger.warning(
+                    "CLS news endpoint unavailable (%s)：财联社快讯已下线/需签名，"
+                    "不再重试；新闻维以东财快讯为源。", e,
+                )
 
     if not all_news:
         return f"No global news found for {curr_date}"
@@ -2640,6 +2787,14 @@ def get_northbound_flow(
         f"# Northbound Capital Flow ({curr_date})",
         "# Source: 同花顺 hsgtApi (沪深股通) + local cache",
         "",
+        # 0.6.8：**无条件**声明该源已停更 —— 无论本次取数成功与否，北向数据都不得作为
+        # 方向证据。此前只有"连续 N 日同值"的启发式命中时才提示，取数直接失败时反而
+        # 只写一句普通失败，下游容易读成"暂时缺数据、等恢复"。
+        # （跨仓契约文案：深研 `advisor/data_health.py` 按 `[数据源停更]` 归类，改须两侧同步。）
+        f"⚠️ {_NB_STALE_MARKER} 北向资金**数据源已永久不可得**（同花顺 hsgtApi 上游停更；"
+        "东财北向自 2024-08 起全系断供）。本维的任何数值与趋势**均不得作为任何方向的"
+        "决策证据**（既不作利多、也不作利空），只能作为『不确定性』如实披露。",
+        "",
     ]
 
     hgt_close = 0.0
@@ -2763,7 +2918,15 @@ def get_northbound_flow(
         return "\n".join(lines)
 
     except Exception as e:
-        return f"Error fetching northbound flow: {str(e)}"
+        # 0.6.8：整段取数失败时**也必须**带上停更声明。只回一句 "Error fetching…"
+        # 会被下游读成"暂时性故障、等恢复后可用"，而该源是**永久**不可得。
+        return (
+            f"# Northbound Capital Flow\n"
+            f"⚠️ {_NB_STALE_MARKER} 北向资金**数据源已永久不可得**"
+            f"（同花顺 hsgtApi 上游停更；东财北向自 2024-08 起全系断供）——"
+            f"本维**不得作为任何方向的决策证据**，只能作为『不确定性』披露。\n"
+            f"本次取数失败：{str(e)}\n"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3055,6 +3218,43 @@ def _load_fund_flow_history(code: str, n: int = 20, cutoff: str = "") -> list:
     return rows[-n:]
 
 
+# 新浪个股资金流（日级）—— 东财 push2his 被**集群级**拦截时的外部备源（0.6.8）。
+# 实测（2026-09-30，A 股服务器）：push2 与镜像 push2delay **同时** RemoteDisconnected，
+# 而本端点稳定返回（实测 2365 行历史）。字段含义按线上响应逐字核对：
+#   opendate=交易日 trade=收盘 changeratio=涨跌幅(比例) turnover=换手率(%)
+#   netamount=当日净流入(元) ratioamount=净流入率 r0_net=**主力(超大单+大单)净额(元)**
+#   r0_ratio=主力净额占比 r0x_ratio=主力净额/成交额(%) cnt_r0x_ratio=主力连续净流入天数(带符号)
+# ⚠️ 新浪**不提供** 大单/中单/小单/超大单 四档拆分 → 这四列留空（渲染为 `—`，不得当 0）；
+# 且其"主力"口径与东财 fflow 不保证一致 ⇒ 输出里必须标注来源（见 get_fund_flow 的来源行）。
+_SINA_FUND_FLOW_URL = (
+    "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+    "MoneyFlow.ssl_qsfx_zjlrqs"
+)
+
+
+def _sina_fund_flow_history(code: str, cutoff: str = "", days: int = 40) -> dict:
+    """新浪个股资金流日级序列 → `{date: [date, main, small, mid, large, super]}`。
+
+    6 元组与东财 `daykline` **同构**，便于直接并入合并字典；新浪不提供的三档留空串
+    （`_fmt_wan("")` → `—`）。异常一律抛给调用方（由调用方降级并留痕），此处不吞。
+    """
+    prefix = "sh" if code.startswith("6") else "sz"
+    r = _requests.get(
+        _SINA_FUND_FLOW_URL,
+        params={"daima": f"{prefix}{code}", "num": str(max(20, int(days)))},
+        timeout=10,
+    )
+    r.raise_for_status()
+    rows = r.json() or []
+    out: dict = {}
+    for row in rows:
+        day = str((row or {}).get("opendate") or "")[:10]
+        if len(day) != 10 or (cutoff and day > cutoff):
+            continue
+        out[day] = [day, (row or {}).get("r0_net"), "", "", "", ""]
+    return out
+
+
 def get_fund_flow(
     ticker: Annotated[str, "A-stock code"],
     curr_date: Annotated[str, "Date YYYY-MM-DD"],
@@ -3193,6 +3393,17 @@ def get_fund_flow(
                 # 等于把未来的资金流喂给模型（未来函数）。
                 external = {d: v for d, v in external.items() if d <= cutoff}
 
+            # 外部备源（0.6.8）：东财 push2his 被**集群级**拦截（主站与镜像 push2delay
+            # 同时断连）时，用新浪 MoneyFlow 补齐该窗口；同日期**东财优先**（口径更完整）。
+            sina_rows: dict = {}
+            if len(external) < 20:
+                try:
+                    sina_rows = _sina_fund_flow_history(code, cutoff=cutoff)
+                except Exception as sina_err:  # noqa: BLE001
+                    logger.warning(
+                        "sina fund flow history failed for %s: %s", code, sina_err
+                    )
+
             # 本地累积缓存：外部历史接口在本网络不可用时的唯一来源；外部行优先。
             local_rows = _load_fund_flow_history(code, n=60, cutoff=cutoff)
             merged: dict = {
@@ -3200,6 +3411,7 @@ def get_fund_flow(
                             r["large"], r["super"]]
                 for r in local_rows
             }
+            merged.update(sina_rows)
             merged.update(external)
             series = [merged[d] for d in sorted(merged)][-20:]
 
@@ -3223,15 +3435,27 @@ def get_fund_flow(
                         f"| small={_fmt_wan(parts[2])} "
                         f"| super={_fmt_wan(parts[5])}"
                     )
+                # 来源必须披露（0.6.8）：新浪源只给「主力净额」，四档拆分缺失，与东财
+                # 口径不保证一致；不写清楚会被下游当成同源数据混用。
+                src_bits = []
+                if external:
+                    src_bits.append(f"东财 push2his {len(external)} 天")
+                if sina_rows:
+                    src_bits.append(f"新浪 MoneyFlow {len(sina_rows)} 天")
+                src_bits.append(f"本地累积 {len(local_rows)} 天")
+                lines.append(f"\n数据来源：{' + '.join(src_bits)}（同日期东财优先）。")
+                if sina_rows:
+                    lines.append(
+                        "⚠️ 含**新浪**来源的行：仅『主力净流入』可得（`r0_net`，口径为"
+                        "超大单+大单净额）；大单/中单/小单/超大单四档**新浪不提供**，"
+                        "显示为 `—`（**不得当作 0**）。跨源口径不完全一致，跨日比较请留意。"
+                    )
                 if len(series) < 20:
                     # 不再让"降级成功但只有 1 行"冒充正常的 20 日窗口（原实现静默
                     # 输出 "last 1 trading days"，读起来像"就只有 1 天数据"）。
                     lines.append(
-                        f"\n注意：外部历史接口不可用或未覆盖（本网络下 push2his 被"
-                        f"主机级拦截，降级镜像 push2delay 对历史接口无能力，仅当日 1 行）。"
-                        f"当前 {len(series)} 天 = 本地累积缓存 {len(local_rows)} 天 + "
-                        f"外部 {len(external)} 天；本地缓存逐日累积，将逐步补齐 20 日窗口。"
-                        f"趋势判断请以现有天数为限。"
+                        f"注意：窗口不足 20 天（当前 {len(series)} 天，为多源合并去重后的"
+                        f"结果）。本地缓存逐日累积将逐步补齐；趋势判断请以现有天数为限。"
                     )
             elif historical:
                 # 说清楚是"这个日期取不到"，而不是让正文里凭空少一段
@@ -3511,6 +3735,84 @@ def get_lockup_expiry(
 # 17. Industry Comparison (行业横向对比)
 # ---------------------------------------------------------------------------
 
+# 新浪行业板块当日行情 —— 东财 push2 行情集群被拦截时的备源（0.6.8）。
+# 实测响应形如 `var S_Finance_bankuai_sinaindustry = {"new_blhy":"new_blhy,玻璃行业,…"}`，
+# **GBK** 编码，含 49 个"新浪行业"。字段顺序**按线上逐字段核对**（勿凭记忆改）：
+#   [0]node key [1]行业名 [2]成分股数 [3]均价(元) [4]涨跌额(元)
+#   [5]**涨跌幅(百分数，0.00629 即 0.00629%)** [6]总成交量(股) [7]总成交额(元)
+#   [8]领涨股代码 [9]领涨股涨跌幅(%) [10]领涨股现价 [11]领涨股涨跌额 [12]领涨股名
+# ⚠️ 单位实测校验（2026-09-30，勿再凭猜改）：[4]/[3]×100 == [5]（0.0010526/16.7332
+# ×100 = 0.00629），且 [9]/[10]×100 与领涨股口径一致 ⇒ **[5] 已是百分数，不得再 ×100**；
+# 首次实现曾误当成"比例"再乘 100，实测跑出 -166% 这种不可能的涨跌幅。且"新浪行业"与
+# 东财行业（m:90+t:2，约 90 个）**不是同一套分类**，跨源不可直接比较——输出里必须写明。
+_SINA_INDUSTRY_URL = "http://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php"
+
+
+def _sina_industry_summary() -> list:
+    """新浪全行业当日行情 → `[{name, pct, count, amount_yi, leader}]`（按涨跌幅降序）。
+
+    解析异常一律抛出（由调用方降级并留痕），此处不吞。
+    """
+    r = _requests.get(_SINA_INDUSTRY_URL, timeout=10)
+    r.raise_for_status()
+    text = r.content.decode("gbk", "replace")
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("新浪行业响应中找不到 JSON 对象")
+    payload = _json.loads(text[start:end + 1])
+    rows = []
+    for raw in (payload or {}).values():
+        parts = str(raw).split(",")
+        if len(parts) < 8:
+            continue
+        try:
+            pct = float(parts[5])                 # [5] **已是百分数**（见上方单位校验）
+        except (TypeError, ValueError):
+            continue
+        try:
+            amount_yi = _fmt_num(float(parts[7]) / 1e8, 1)
+        except (TypeError, ValueError):
+            amount_yi = "—"
+        rows.append({
+            "name": parts[1],
+            "pct": pct,
+            "count": parts[2],
+            "amount_yi": amount_yi,
+            "leader": parts[12] if len(parts) > 12 else "",
+        })
+    rows.sort(key=lambda x: x["pct"], reverse=True)
+    return rows
+
+
+def _render_sina_industry(lines: list, top_n: int, reason: str) -> bool:
+    """东财不可用时追加新浪行业段；返回是否成功渲染（False → 调用方再报错/报空）。"""
+    try:
+        rows = _sina_industry_summary()
+    except Exception as sina_err:  # noqa: BLE001
+        logger.warning("sina industry summary failed: %s", sina_err)
+        return False
+    if not rows:
+        return False
+    lines.append(f"\n## 全行业表现（备源：新浪行业 · {len(rows)} 个行业）")
+    lines.append(
+        f"> ⚠️ {reason}。本段改用**新浪行业**分类（≠ 东财行业，行业数与口径均不同），"
+        "涨跌幅为**行业指数级**（非成分股市值加权），跨源不可直接比较。"
+    )
+    lines.append("方向 | 行业 | 涨跌幅 | 成分股数 | 成交额(亿) | 领涨股")
+    for i, row in enumerate(rows[:top_n], 1):
+        lines.append(
+            f"  涨{i}. {row['name']} | {row['pct']:.2f}% | {row['count']} "
+            f"| {row['amount_yi']} | {row['leader']}"
+        )
+    if len(rows) > 2 * top_n:
+        for i, row in enumerate(rows[-top_n:], 1):
+            lines.append(
+                f"  跌{i}. {row['name']} | {row['pct']:.2f}% | {row['count']} "
+                f"| {row['amount_yi']} | {row['leader']}"
+            )
+    return True
+
+
 def get_industry_comparison(
     ticker: str,
     trade_date: str,
@@ -3584,8 +3886,14 @@ def get_industry_comparison(
                     lines.append(f"  ... (showing top/bottom {top_n})")
                     break
         else:
-            lines.append("行业数据获取为空。")
+            # 备源（0.6.8）：东财 push2 行情集群在本网络被**应用层拦截**（主站与镜像
+            # push2delay 同时 RemoteDisconnected）→ 改用新浪行业，并显式标注分类体系差异。
+            if not _render_sina_industry(
+                lines, top_n, "东财 push2 行情集群在本网络被应用层拦截"
+            ):
+                lines.append("行业数据获取为空。")
     except Exception as e:
-        lines.append(f"行业对比查询失败: {e}")
+        if not _render_sina_industry(lines, top_n, f"东财行业接口异常（{e}）"):
+            lines.append(f"行业对比查询失败: {e}")
 
     return "\n".join(lines)

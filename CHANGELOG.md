@@ -6,6 +6,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.6.8] — 2026-09-30
+
+### Fixed/Added（数据缺失：可修的全修 + 不可修的显式标注）
+
+**动因（逐项实测）**：2026-09-30 三只票（002833/300358/301119）的深研报告出现大量数据缺失，
+按"是否可修"分成三类逐项处理——**先探源、再改码**（所有替代源都在 A 股服务器上实测过）。
+
+#### 已修：换到**实测可用**的替代源
+
+| 缺失项 | 原源 / 失败原因 | 新源（实测） |
+|---|---|---|
+| 个股主力资金净流入（当日+近 20 日） | 东财 `push2/push2his`——**主站与镜像 `push2delay` 同时 `RemoteDisconnected`** | 新浪 `MoneyFlow.ssl_qsfx_zjlrqs`（实测 2365 行历史；字段 `r0_net`=主力净额） |
+| 行业横向对比 | 东财 `push2/api/qt/clist`（同上被拦） | 新浪 `newSinaHy.php`（49 个行业，GBK）+ `getHQNodes` 枚举 |
+| 财联社 7×24 快讯 | `cls.cn/nodeapi/telegraphList` **实测 HTML 404**（现行 `v1/roll/get_roll_list` 需签名） | 东财快讯 `np-weblist`（**对调为主力源**；财联社降为可选补位，失败只告警一次） |
+| 官方扣非净利润科目 | 未接 | 东财 datacenter `RPT_F10_FINANCE_MAINFINADATA` |
+| 分红明细 / 每股派息口径 | 未接 | 东财 datacenter `RPT_SHAREBONUS_DET` |
+| 股权质押 | 未接 | 东财 datacenter `RPT_CSDC_LIST` |
+
+- `dataflows/a_stock.py`：
+  - 新增 `_sina_fund_flow_history()`（并入 `get_fund_flow` 的合并序列，**同日期东财优先**）；
+    新浪只提供主力净额、**无四档拆分** → 那四列留空渲染为 `—`（**不得当 0**），
+    并在输出里**披露来源**与口径差异。
+  - 新增 `_sina_industry_summary()` / `_render_sina_industry()`：东财空或异常时降级到新浪，
+    并显式标注「分类体系=新浪行业（≠东财）、涨跌幅为行业指数级、跨源不可直接比较」。
+  - 新增 `_datacenter_main_financial_section()`（转置成「指标 × 最近 2 期」，含扣非/ROE/毛利率…）、
+    `_datacenter_dividend_section()`、`_datacenter_pledge_section()`（挂到 `get_fundamentals`
+    与 `get_insider_transactions`）。
+  - `get_global_news()`：东财快讯升为主力源，财联社降为"东财为空时补位"。
+- **两处"差点出假数据"的单位坑（实测校准，勿凭记忆改）**：
+  - 新浪行业 `[5]` **已是百分数**（`[4]/[3]×100 == [5]` 实测校验）——首版误当成比例再 ×100，
+    实测跑出 `-166.70%` 这种不可能的日涨跌幅；
+  - datacenter `DIVIDENT_RATIO` 是**比例**（0.0158646=1.59%），渲染时**必须** ×100。
+  - 质押表 `PLEDGE_MARKET_CAP` / `REPURCHASE_BALANCE` **单位未核实** → **不输出**
+    （只出日期/质押比例%/笔数），宁可少给也不误读。
+
+#### 已修：不可得源的**显式标注**（让下游裁决不拿它当证据）
+
+- `agents/utils/agent_utils.py`：新增 `_PERMANENTLY_UNAVAILABLE_RULE`，随
+  `get_language_instruction()`（全部产出型 agent 共用入口）恒定下发：北向资金 /
+  政策文件原文 / 国内外收入拆分·海外收入占比——**不得**用外部知识补数、**不得**作为
+  任何方向证据、必须保留标注、只能列为「不确定性」。
+- `dataflows/a_stock.py::get_northbound_flow()`：输出**无条件**带 `[数据源停更]` 声明
+  （此前只有"连续 N 日同值"的启发式命中才提示，**整段取数失败时只回 `Error fetching…`**，
+  会被下游读成"暂时故障、等恢复"）；取数失败路径同样带声明。
+- `agents/quality_gate.py`：`FAILURE_MARKERS` 收录 `[数据源停更]`（跨仓契约串，与
+  `a_stock._NB_STALE_MARKER` 逐字一致），使该类报告如实降级、不被当作正常覆盖。
+
+#### 不改（附理由）
+
+- **北向**：同花顺 hsgtApi 上游停更、东财北向自 2024-08 全系断供 ⇒ **无可用源**；
+  维持"自铸历史 + 如实标注"。
+- **政策文件原文 / 国内外收入拆分·海外占比**：新闻与财报源**本就不含全文** ⇒
+  补它等于臆造（违反 §0），只做标注。
+- **龙虎榜席位明细**：**已实现**（`RPT_BILLBOARD_DAILYDETAILSBUY/SELL` 早已在用）——
+  报告里的那类"缺失"是**该股近 30 日确实未上榜**（002833 最近一次为 2023-02-22），属**事实性**。
+
+**测试**（新增 18 例）：`tests/test_astock_multisource_068.py`（新增，18 例：新浪资金流解析/截断/
+异常/空、接入与来源披露、新浪行业 **单位回归**（`-1.667` 不得变 `-166.7`）/短行跳过/异常、
+`_render_sina_industry` 成功与失败两态、主要财务指标（含扣非）/None→`—`/空、分红比例×100、
+质押空→`[]` 与"单位未核实字段不输出"、不可得源纪律注入、门控词表含停更标记、北向失败路径带声明）；
+另更新 4 个既有用例把新备源 stub 掉以保持无网络（`test_astock_fund_flow_cache` ×3、
+`test_lookahead_guard` ×1、`test_astock_p0p1_fixes` ×2）。
+
+**本机实测**：全量 → **845 passed / 15 skipped / 0 failed**（较上一版 827 增 18 例）。
+
 ## [0.6.7] — 2026-09-30
 
 ### Fixed（工具轮次上限：截断不再留下空报告，且截断事件可被下游归因）

@@ -240,6 +240,8 @@ def test_fund_flow_says_when_history_is_unavailable(monkeypatch):
         return FakeResp({"data": {"klines": []}})
 
     monkeypatch.setattr(a_stock, "_em_get", empty_hist)
+    # 0.6.8：新增新浪外部备源 → 本用例测「全部外部源都空」时的如实说明，故把新浪也 stub 空
+    monkeypatch.setattr(a_stock, "_sina_fund_flow_history", lambda *a, **k: {})
     out = a_stock.get_fund_flow("600519", PAST)
 
     assert "未能取到" in out

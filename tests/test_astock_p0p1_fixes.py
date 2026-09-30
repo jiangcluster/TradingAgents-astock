@@ -460,6 +460,10 @@ def test_industry_comparison_leader_falls_back_to_code(monkeypatch):
 
 def test_industry_comparison_empty_items(monkeypatch):
     _patch_clist(monkeypatch, [])
+    # 0.6.8：新增新浪行业备源 → 本用例测「东财空且备源也不可用」时的如实报空
+    monkeypatch.setattr(
+        a_stock, "_sina_industry_summary",
+        lambda: (_ for _ in ()).throw(RuntimeError("sina down")))
 
     out = a_stock.get_industry_comparison("600036", "2026-09-04")
 
@@ -471,6 +475,9 @@ def test_industry_comparison_error_is_reported_not_raised(monkeypatch):
         raise RuntimeError("clist down")
 
     monkeypatch.setattr(a_stock, "_em_get", boom)
+    monkeypatch.setattr(
+        a_stock, "_sina_industry_summary",
+        lambda: (_ for _ in ()).throw(RuntimeError("sina down")))
 
     out = a_stock.get_industry_comparison("600036", "2026-09-04")
 

@@ -47,11 +47,32 @@ _OUTPUT_STYLE = (
 )
 
 
+# 不可得数据源纪律（0.6.8）：这些项在本环境**已确认不可得且无可用替代源**（探源记录见
+# `dataflows/a_stock.py` 对应函数的注释：北向=上游停更、政策原文/海外收入拆分=源无全文）。
+# 缺它们时模型最容易犯两个错：① 用外部知识或新闻语气"补"一个数字（臆造）；② 把"缺数据"
+# 读成"没有风险/没有资金流入"，让某一方的论证凭空占优（2026-09 那轮 24 票零多头就是这个
+# 形状，见 0.5.31/0.5.32 的处置）。故写成**硬性纪律**，与交付格式同入口下发，避免 15
+# 处调用面各写一遍。
+_PERMANENTLY_UNAVAILABLE_RULE = (
+    " 【不可得数据源纪律（强制）】以下数据在本环境**已确认不可得**且**无可用替代源**："
+    "① 北向资金（来源已停更，正文里带 `[数据源停更]` 标记）；"
+    "② 政策文件原文（以旧换新/部委专项/关税清单等，新闻源不含全文）；"
+    "③ 公司国内外收入拆分与海外收入占比（行情与财报源均不提供）。"
+    "对这三类：**不得**用你自己的知识、记忆或推断补出具体数值或方向；"
+    "**不得**作为任何方向的证据（既不作利多、也不作利空）；"
+    "必须原样保留 `[数据源停更]` / `[数据缺失: …]` 标注；"
+    "在结论中只能把它们列为『不确定性』，不得写成『风险已排除』或『利好待兑现』。"
+)
+
+
 def get_language_instruction() -> str:
-    """产出型 agent 的**输出约束**：交付格式（恒定）+ 语言（按配置）。
+    """产出型 agent 的**输出约束**：交付格式 + 不可得源纪律（恒定）+ 语言（按配置）。
 
     交付格式约束恒定注入——agent 正文会原样进交付报告，"草稿式推理"与"贴原始数组"
     属无效信息（见 `_OUTPUT_STYLE` 的实测依据）。
+
+    不可得源纪律（0.6.8）：恒定注入，确保**下游裁决**不会把已停更/源无全文的数据
+    当作证据使用（见 `_PERMANENTLY_UNAVAILABLE_RULE` 的动因）。
 
     语言约束（0.5.29）：`output_language=Chinese` 时注入中文指令；设为 `English`
     （默认）时**不注入**（省 token）。辩论类 agent 一并纳入（此前刻意留英文 →
@@ -60,7 +81,7 @@ def get_language_instruction() -> str:
     from tradingagents.dataflows.config import get_config
     lang = get_config().get("output_language", "English")
     lang_part = "" if lang.strip().lower() == "english" else f" Write your entire response in {lang}."
-    return _OUTPUT_STYLE + lang_part
+    return _PERMANENTLY_UNAVAILABLE_RULE + _OUTPUT_STYLE + lang_part
 
 
 def build_instrument_context(ticker: str) -> str:

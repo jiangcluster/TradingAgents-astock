@@ -78,6 +78,9 @@ FAILURE_MARKERS = [
     "No hot stocks data",           # 游资/热门股为空
     "No news found for",            # 个股新闻为空
     "未提供分析日期",                # 缺 curr_date → 时点截断失效（_missing_curr_date_notice）
+    # —— 0.6.8 补：长期不可得的数据源标记（跨仓契约串，与 a_stock._NB_STALE_MARKER 一致）——
+    # 命中即说明该维数据来自已停更的源，必须如实降级，不得当作正常覆盖。
+    "[数据源停更]",
 ]
 
 

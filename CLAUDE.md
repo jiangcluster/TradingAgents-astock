@@ -6,7 +6,7 @@
 - **仓库**: https://github.com/TauricResearch/TradingAgents
 - **协议**: Apache 2.0
 - **Python**: >=3.10
-- **当前版本**: 0.6.7（2026-09-30 发布；0.6.0 起版本号跳段，退出与源仓库 simonlin1212/TradingAgents-astock 重叠的 0.5.x 号段）
+- **当前版本**: 0.6.8（2026-09-30 发布；0.6.0 起版本号跳段，退出与源仓库 simonlin1212/TradingAgents-astock 重叠的 0.5.x 号段）
   ⚠️ 改版本号时**五处要一起改**：`pyproject.toml` / `CHANGELOG.md` / 这一行 /
   `tradingagents/__init__.py` 的 `__version__`（headless JSON 的 `ta_version` 取自它，
   下游靠它做版本握手）/ `cli/headless.py` docstring 里的示例 JSON（0.5.28 起纳入守卫）。
@@ -17,15 +17,20 @@
 ### 数据层（v0.2.5 全部直连 HTTP，零第三方数据库依赖）
 | 来源 | 协议 | 数据 |
 |------|------|------|
-| mootdx | TCP 7709 | OHLCV K线、财务快照、F10 文本 |
-| 腾讯财经 | HTTP (qt.gtimg.cn) | PE/PB/市值/换手率 |
-| 东方财富 datacenter | HTTP (datacenter-web) | 龙虎榜、限售解禁、板块行情 |
-| 东方财富 push2/push2his | HTTP (push2.eastmoney) | 实时行情、个股信息、板块列表、资金流(分钟+日级) |
-| 东方财富 np-weblist | HTTP | 滚动新闻 |
-| 新浪财经 | HTTP (money.finance.sina) | K线历史、财报三表 |
+| mootdx | TCP 7709 | OHLCV K线、财务快照、F10 文本（**本网络协议被拒 → 已由东财 datacenter 回退**） |
+| 腾讯财经 | HTTP (qt.gtimg.cn) | PE/PB/市值/换手率、K线兜底 |
+| 东方财富 datacenter | HTTP (datacenter-web) | 龙虎榜（含席位明细）、限售解禁、股东/增减持/户数、**主要财务指标（含扣非）**、**分红送配**、**股权质押**、板块行情 |
+| 东方财富 push2/push2his | HTTP (push2.eastmoney) | 实时行情、个股信息、板块列表、资金流(分钟+日级)——**本网络被应用层拦截（主站与镜像同时断连）** |
+| 东方财富 np-weblist | HTTP | 滚动新闻（**现为新闻维主力源**） |
+| 新浪财经 | HTTP (money.finance.sina) | K线历史、财报三表、**个股资金流日级（`MoneyFlow.ssl_qsfx_zjlrqs`，push2his 备源）**、**全行业涨跌幅（`newSinaHy.php`，push2 备源；GBK）** |
 | 同花顺 10jqka | HTTP | EPS 一致预期、热股题材 |
-| 财联社 cls.cn | HTTP | 全球财经快讯 |
-| 百度股市通 | HTTP (gushitong.baidu) | 概念板块归属（资金流已迁移至东财push2） |
+| 财联社 cls.cn | HTTP | ~~全球财经快讯~~ **已下线/需签名（实测 404 / errno 10012）→ 降为可选补位，失败只告警一次** |
+| 百度股市通 | HTTP (gushitong.baidu) | 概念板块归属（资金流已迁移至东财 push2） |
+
+> **不可得数据源纪律（0.6.8）**：北向资金（源停更）、政策文件原文、公司国内外收入拆分/
+> 海外收入占比——**无可用替代源**，已在 `agent_utils._PERMANENTLY_UNAVAILABLE_RULE`
+> 里写成硬性纪律随全部产出型 agent 下发：不得用外部知识补数、不得作为任何方向证据、
+> 必须保留标注、只能列为「不确定性」。北向输出**无条件**带 `[数据源停更]`（含取数失败路径）。
 
 ### Agent 角色（7 个）
 原版 4 个（市场/情绪/新闻/基本面）+ A 股特化 3 个（政策分析师/游资追踪/解禁监控）

@@ -118,6 +118,8 @@ def test_get_fund_flow_merges_local_cache_and_warns_on_short_window(monkeypatch,
     from tradingagents.dataflows import a_stock
 
     _patch_cache(monkeypatch, tmp_path)
+    # 0.6.8：新增新浪外部备源 → 本用例只测「东财 + 本地」合并，把新浪 stub 掉保持无网络
+    monkeypatch.setattr(a_stock, "_sina_fund_flow_history", lambda *a, **k: {})
     # 缓存存原始「元」，渲染时转「万元」
     a_stock._save_fund_flow_snapshot(
         "2026-09-10", "600938",
@@ -129,8 +131,11 @@ def test_get_fund_flow_merges_local_cache_and_warns_on_short_window(monkeypatch,
     assert "last 2 trading days" in text          # 本地 1 天 + 外部 1 天
     assert "| main=111" in text                   # 本地行
     assert "| main=13827" in text                 # 外部行
-    assert "注意：外部历史接口不可用或未覆盖" in text   # 降级显式化，不再静默
-    assert "本地累积缓存 2 天" in text
+    assert "注意：窗口不足 20 天" in text            # 降级显式化，不再静默
+    assert "本地累积 2 天" in text
+    # 0.6.8：来源必须披露（新浪未参与时不得出现新浪字样）
+    assert "数据来源：东财 push2his 1 天 + 本地累积 2 天" in text
+    assert "新浪 MoneyFlow" not in text
 
 
 def test_get_fund_flow_writes_today_snapshot(monkeypatch, tmp_path):
@@ -149,6 +154,7 @@ def test_get_fund_flow_history_failure_does_not_break_tool(monkeypatch, tmp_path
     from tradingagents.dataflows import a_stock
 
     _patch_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(a_stock, "_sina_fund_flow_history", lambda *a, **k: {})
     a_stock._save_fund_flow_snapshot("2026-09-10", "600938", {"main": 1110000})
 
     class _Resp:
@@ -175,6 +181,7 @@ def test_get_fund_flow_historical_cutoff_excludes_future_rows(monkeypatch, tmp_p
     from tradingagents.dataflows import a_stock
 
     _patch_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(a_stock, "_sina_fund_flow_history", lambda *a, **k: {})
     for day, value in (("2026-09-08", 800000), ("2026-09-10", 1000000),
                        ("2026-09-11", 1100000)):
         a_stock._save_fund_flow_snapshot(day, "600938", {"main": value})
