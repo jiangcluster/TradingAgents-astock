@@ -50,9 +50,9 @@ agentsdk = ["claude-agent-sdk>=0.2.82"]
 web = ["streamlit>=1.45.0", "fpdf2>=2.8.6"]
 
 [project.urls]
-Homepage = "https://github.com/simonlin1212/tradingagents-astock"
-Repository = "https://github.com/simonlin1212/tradingagents-astock"
-Issues = "https://github.com/simonlin1212/tradingagents-astock/issues"
+Homepage = "https://github.com/TauricResearch/TradingAgents"
+Repository = "https://github.com/TauricResearch/TradingAgents"
+Issues = "https://github.com/TauricResearch/TradingAgents/issues"
 Upstream = "https://github.com/TauricResearch/TradingAgents"
 
 # NOTE: there is deliberately no `[google]` extra — see #87.

@@ -13,8 +13,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/simonlin1212/tradingagents-astock/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/simonlin1212/tradingagents-astock?style=social"/></a>
-  <a href="https://github.com/simonlin1212/tradingagents-astock/network/members"><img alt="Forks" src="https://img.shields.io/github/forks/simonlin1212/tradingagents-astock?style=social"/></a>
+  <a href="https://github.com/TauricResearch/TradingAgents/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/TauricResearch/TradingAgents?style=social"/></a>
+  <a href="https://github.com/TauricResearch/TradingAgents/network/members"><img alt="Forks" src="https://img.shields.io/github/forks/TauricResearch/TradingAgents?style=social"/></a>
   <a href="https://arxiv.org/abs/2412.20138"><img alt="Paper" src="https://img.shields.io/badge/paper-arXiv_2412.20138-B31B1B?logo=arxiv"/></a>
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue"/></a>
   <a href="./CHANGES_FROM_UPSTREAM.md"><img alt="Changes" src="https://img.shields.io/badge/changes-CHANGES-orange"/></a>
@@ -144,7 +144,7 @@ All free, no API key, no point wall:
 
 ```bash
 # Python >= 3.10
-git clone https://github.com/simonlin1212/tradingagents-astock.git
+git clone https://github.com/TauricResearch/TradingAgents.git
 cd tradingagents-astock
 pip install -e .
 
@@ -414,7 +414,7 @@ Older images did not pre-create the data directory. When the `docker-compose` na
 These reports are generated after the corresponding Analyst calls data tools. **Empty reports are automatically skipped and not displayed.** The data sources themselves are healthy (Tencent/mootdx/Tonghuashun/Dongcai have been tested and return data). Reports are usually empty because **the selected model has weak tool-call capabilities** (e.g., some lightweight deepseek/minimax models are unstable when calling tools). It is recommended to switch to a model with more stable tool-calls (deepseek-chat / Tongyi / GLM-4 / Claude / GPT, etc.), or retry.
 
 **Q: Why is there no `[google]` extra any more? How do I install Gemini?**
-**The `[google]` extra was removed in v0.3.1** ([#87](https://github.com/simonlin1212/TradingAgents-astock/issues/87)). `langchain-google-genai>=4.0.0` requires `google-genai>=1.53.0`, and **every** google-genai release in that range requires `httpx>=0.28.1`, while mootdx (the core A-share data source) pins `httpx>=0.25,<0.26`. **No version combination satisfies both — the conflict is structural, not a bad pin.**
+**The `[google]` extra was removed in v0.3.1** ([#87](https://github.com/TauricResearch/TradingAgents/issues/87)). `langchain-google-genai>=4.0.0` requires `google-genai>=1.53.0`, and **every** google-genai release in that range requires `httpx>=0.28.1`, while mootdx (the core A-share data source) pins `httpx>=0.25,<0.26`. **No version combination satisfies both — the conflict is structural, not a bad pin.**
 
 The real damage: **uv builds a universal lock covering all extras**, so merely declaring the extra made `uv sync` fail for **everyone**, including users who never wanted Gemini. Leaving it empty would be worse (`pip install .[google]` would silently install nothing). So it was removed, and `google_client.py` now raises an ImportError containing the exact install commands.
 
@@ -510,7 +510,7 @@ If this tool saved you time, a coffee is appreciated ☕
   <a href="https://buymeacoffee.com/simonlin1212"><img src="./assets/bmc-qr.png" width="180" alt="Buy Me a Coffee"></a>
 </p>
 
-> Want a feature that isn't here? Open an [Issue](https://github.com/simonlin1212/tradingagents-astock/issues); sponsors' issues go first.
+> Want a feature that isn't here? Open an [Issue](https://github.com/TauricResearch/TradingAgents/issues); sponsors' issues go first.
 
 ---
 

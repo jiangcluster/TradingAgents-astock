@@ -10,6 +10,9 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -54,8 +57,46 @@ _PRIVATE_KEY_NEEDLES = tuple(
 )
 
 
-def _iter_repo_files():
-    for path in REPO.rglob("*"):
+def _git_repo_files(root: Path):
+    """git 视角的"仓内容"：`git ls-files --cached --others --exclude-standard`。
+
+    含**已跟踪**文件 + **未跟踪但未被 ignore** 的文件，自动排除 `.gitignore` 里的运行时产物
+    （`.env` / `.env.bak.*` / `.venv` / 缓存等）。git 缺失、非仓库、或命令失败 → 返回 None
+    （调用方回落文件系统扫描）——保持"无 git 也能跑"的既有前提。
+
+    **为什么需要它（2026-09-30 / B7′）**：原先只走 `rglob` 扫文件系统，在**生产部署机**上会把
+    部署必需的 `~/TradingAgents-astock/.env` 与历史备份 `.env.bak.*` 当成"凭据/残留"误报，
+    使 B7 在服务器上恒失败（守卫只在开发机成立）。改后 B7 仍能抓到**已提交**的 `.env`
+    （tracked → 仍在清单里），只是不再把 gitignore 的本地产物算作仓内容。
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--cached", "--others",
+             "--exclude-standard", "-z"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):  # git 不存在 / 超时 → 回落
+        return None
+    if proc.returncode != 0:
+        return None
+    names = [n for n in (proc.stdout or "").split("\0") if n]
+    if not names:  # 空仓/异常输出不当作"仓内容为空"，回落更安全
+        return None
+    return names
+
+
+def _iter_repo_files(root: Path = REPO):
+    """仓内容文件迭代：优先 git 清单（尊重 .gitignore），无 git 时回落文件系统扫描。"""
+    names = _git_repo_files(root)
+    if names is not None:
+        for name in names:
+            path = root / name
+            if any(part in _SKIP_DIRS for part in path.parts):
+                continue
+            if path.is_file():
+                yield path
+        return
+    for path in root.rglob("*"):
         if any(part in _SKIP_DIRS for part in path.parts):
             continue
         if path.is_file():
@@ -143,6 +184,36 @@ def test_repo_has_no_credentials_or_temp_residue():
             offenders.append(f"{rel}（疑似明文 API key）")
 
     assert not offenders, "仓内可疑残留：\n" + "\n".join(offenders)
+
+
+# ---------------------------------------------------------------------------
+# B7′（2026-09-30）：`_iter_repo_files` 的两态各自都不空转
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(shutil.which("git") is None, reason="需要 git 构造 tracked/ignored 两态")
+def test_git_file_list_keeps_tracked_env_and_drops_ignored(tmp_path):
+    """反向对照：**已跟踪**的 `.env` 必须仍在清单（B7 不被架空）；**被 ignore** 的
+    `.env.local` 必须被排除（消除生产部署机的误报）。"""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, timeout=30)
+    (repo / ".gitignore").write_text(".env.local\n", encoding="utf-8")
+    (repo / ".env").write_text("KEY=1\n", encoding="utf-8")
+    (repo / ".env.local").write_text("KEY=2\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", ".gitignore", ".env"],
+                   check=True, timeout=30)
+
+    names = _git_repo_files(repo)
+    assert names is not None
+    assert ".env" in names              # tracked → 仍会被 B7 抓到
+    assert ".env.local" not in names    # ignored → 不再误报
+
+
+def test_iter_repo_files_falls_back_to_filesystem_without_git(tmp_path, monkeypatch):
+    """git 不可用（`_git_repo_files` 返回 None）时回落文件系统扫描，`.env` 仍被抓到。"""
+    (tmp_path / ".env").write_text("KEY=1\n", encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "_git_repo_files", lambda root: None)
+    found = {p.name for p in _iter_repo_files(tmp_path)}
+    assert ".env" in found
 
 
 def test_clear_checkpoints_help_documents_risk():

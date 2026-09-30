@@ -3,7 +3,7 @@
 ## 项目概述
 基于 [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)（65K Stars）的 A 股深度特化 fork。多 Agent 投研框架，7 个 Analyst 角色通过 Bull/Bear 辩论 + 三方风险辩论生成投资报告。
 
-- **仓库**: https://github.com/simonlin1212/TradingAgents-astock
+- **仓库**: https://github.com/TauricResearch/TradingAgents
 - **协议**: Apache 2.0
 - **Python**: >=3.10
 - **当前版本**: 0.5.42（2026-09-29 发布）

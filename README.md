@@ -13,8 +13,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/simonlin1212/tradingagents-astock/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/simonlin1212/tradingagents-astock?style=social"/></a>
-  <a href="https://github.com/simonlin1212/tradingagents-astock/network/members"><img alt="Forks" src="https://img.shields.io/github/forks/simonlin1212/tradingagents-astock?style=social"/></a>
+  <a href="https://github.com/TauricResearch/TradingAgents/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/TauricResearch/TradingAgents?style=social"/></a>
+  <a href="https://github.com/TauricResearch/TradingAgents/network/members"><img alt="Forks" src="https://img.shields.io/github/forks/TauricResearch/TradingAgents?style=social"/></a>
   <a href="https://arxiv.org/abs/2412.20138"><img alt="论文" src="https://img.shields.io/badge/论文-arXiv_2412.20138-B31B1B?logo=arxiv"/></a>
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue"/></a>
   <a href="./CHANGES_FROM_UPSTREAM.md"><img alt="改动记录" src="https://img.shields.io/badge/改动记录-CHANGES-orange"/></a>
@@ -153,7 +153,7 @@
 
 ```bash
 # Python >= 3.10
-git clone https://github.com/simonlin1212/tradingagents-astock.git
+git clone https://github.com/TauricResearch/TradingAgents.git
 cd tradingagents-astock
 pip install -e .
 
@@ -436,7 +436,7 @@ v0.2.12 起 Dockerfile 已内置 `fonts-noto-cjk`，重新 `docker build` 即可
 这些报告由对应 Analyst 调用数据工具后生成，**空报告会被自动跳过不显示**。数据源本身是健康的（腾讯/mootdx/同花顺/东财实测出数）；报告为空通常是**所选模型 tool-call 能力弱**（如部分 deepseek/minimax 轻量模型不稳定地调用工具）。建议换用 tool-call 更稳的模型（deepseek-chat / 通义 / GLM-4 / Claude / GPT 等），或重试。
 
 **Q: 为什么没有 `[google]` extra 了？装 Gemini 报 httpx 冲突怎么办？**
-**v0.3.1 起移除了 `[google]` extra**（[#87](https://github.com/simonlin1212/TradingAgents-astock/issues/87)）。原因：`langchain-google-genai>=4.0.0` 要求 `google-genai>=1.53.0`，而该区间内**每一个** google-genai 版本都要求 `httpx>=0.28.1`；mootdx（核心 A 股数据源）钉死 `httpx>=0.25,<0.26`。**没有任何版本组合能同时满足，冲突是结构性的。**
+**v0.3.1 起移除了 `[google]` extra**（[#87](https://github.com/TauricResearch/TradingAgents/issues/87)）。原因：`langchain-google-genai>=4.0.0` 要求 `google-genai>=1.53.0`，而该区间内**每一个** google-genai 版本都要求 `httpx>=0.28.1`；mootdx（核心 A 股数据源）钉死 `httpx>=0.25,<0.26`。**没有任何版本组合能同时满足，冲突是结构性的。**
 
 真正的问题是：**uv 构建的是覆盖所有 extra 的 universal lock**，所以只要这个 extra 存在，`uv sync` 就对**所有人**失败——包括从不用 Gemini 的用户。把 extra 留空更糟（`pip install .[google]` 会静默什么都不装，用户以为装好了）。所以直接移除，并在 `google_client.py` 导入失败时给出可直接执行的安装命令。
 
@@ -539,7 +539,7 @@ TradingAgents-Astock/
   <a href="https://buymeacoffee.com/simonlin1212"><img src="./assets/bmc-qr.png" width="180" alt="Buy Me a Coffee"></a>
 </p>
 
-> 想要什么功能？欢迎开 [Issue](https://github.com/simonlin1212/tradingagents-astock/issues) 提需求，赞助者的 Issue 优先处理。
+> 想要什么功能？欢迎开 [Issue](https://github.com/TauricResearch/TradingAgents/issues) 提需求，赞助者的 Issue 优先处理。
 
 ---
 
