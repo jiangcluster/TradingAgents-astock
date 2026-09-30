@@ -2893,6 +2893,21 @@ def _concept_blocks_live(ticker: str) -> str:
             )
 
         result = d.get("Result", {})
+        # 百度风控会回 HTTP 403 + {"ResultCode": 0(**整数**), "Result": {"code": 403,
+        # "isCaptchaEnabled": true, "msg": "hit risk"}}：外层 ResultCode 是整数 0，
+        # 上面那句 `str(...) != "0"` 放它过关，随后 `result.get(code, [])` 取空 →
+        # 落到 `No concept/block data`，于是**一次「取数被拦」被当成「该股确实没有
+        # 概念板块」这个错的事实**喂给模型（源仓库 a13f336）。本仓另有东财 slist 降级，
+        # 故这里先降级；降级也取不到时才**如实报出被拦**，而不是谎报「无数据」。
+        if isinstance(result, dict) and result.get("code") == 403:
+            em = _em_concept_blocks(code)
+            if em:
+                return em
+            return (
+                f"Baidu PAE 风控拦截（hit risk），{code} 的概念板块本次取不到。"
+                "该接口会对 python-requests 的 TLS 指纹做风控（同一时刻 curl 正常），"
+                "需 curl_cffi 浏览器指纹伪装才能稳定取数。"
+            )
         categories = result.get(code, [])
         if not categories:
             em = _em_concept_blocks(code)

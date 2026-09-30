@@ -714,6 +714,51 @@ def test_concept_blocks_falls_back_when_baidu_empty(monkeypatch):
     assert a_stock.get_concept_blocks("603613", a_stock._market_today().isoformat()) == "EM_FALLBACK_BODY"
 
 
+def test_concept_blocks_403_with_integer_resultcode_falls_back(monkeypatch):
+    """百度风控（HTTP 403 + **整数** ResultCode 0 + `Result.code=403`）必须走降级。
+
+    阴性侧：`str(d.get("ResultCode", -1)) != "0"` 对**整数** 0 放行 —— 风控于是被当成
+    「该股没有概念板块」（源仓库 a13f336）。本用例把该形态钉死：必须降级到东财。
+    """
+    monkeypatch.setattr(a_stock._requests, "get", lambda *a, **k: FakeResp({
+        "ResultCode": 0,
+        "Result": {"code": 403, "isCaptchaEnabled": True, "msg": "hit risk"},
+    }))
+    monkeypatch.setattr(a_stock, "_em_concept_blocks", lambda code: "EM_FALLBACK_BODY")
+
+    assert a_stock.get_concept_blocks(
+        "603613", a_stock._market_today().isoformat()
+    ) == "EM_FALLBACK_BODY"
+
+
+def test_concept_blocks_403_reports_blocked_not_no_data(monkeypatch):
+    """降级也取不到时，必须如实说「被风控拦截」，**不得**谎报"No concept/block data"。"""
+    monkeypatch.setattr(a_stock._requests, "get", lambda *a, **k: FakeResp({
+        "ResultCode": 0,
+        "Result": {"code": 403, "isCaptchaEnabled": True, "msg": "hit risk"},
+    }))
+    monkeypatch.setattr(a_stock, "_em_concept_blocks", lambda code: "")
+
+    out = a_stock.get_concept_blocks("603613", a_stock._market_today().isoformat())
+
+    assert "风控拦截" in out and "hit risk" in out
+    assert "No concept/block data" not in out, "「取数被拦」不能写成「该股没有概念板块」"
+
+
+def test_concept_blocks_genuine_empty_still_says_no_data(monkeypatch):
+    """反面对照：真·无概念板块（Result 里无 403 标记）仍须报 `No concept/block data`，
+    防止把 403 处理扩大成「一切空结果都算被拦」。"""
+    monkeypatch.setattr(a_stock._requests, "get", lambda *a, **k: FakeResp({
+        "ResultCode": "0", "Result": {"603613": []},
+    }))
+    monkeypatch.setattr(a_stock, "_em_concept_blocks", lambda code: "")
+
+    out = a_stock.get_concept_blocks("603613", a_stock._market_today().isoformat())
+
+    assert "No concept/block data" in out
+    assert "风控拦截" not in out
+
+
 def test_concept_blocks_keeps_baidu_error_when_fallback_empty(monkeypatch):
     """东财也取不到时，保留原错误文案，不能静默变成“无数据”。"""
     monkeypatch.setattr(a_stock._requests, "get",
@@ -804,6 +849,27 @@ def test_get_fundamentals_eps_forecast_empty_skips_section(monkeypatch):
 
     assert "Consensus EPS Forecast" not in out
     assert "FY" not in out
+
+
+def test_ths_eps_forecast_never_uses_read_html():
+    """守卫：一致预期**不得**再退回 `pd.read_html`。
+
+    源仓库 2444646 实测 pandas 3.0.5：`pd.read_html('<table>…</table>')` 会把字符串
+    当**路径** → 必抛 `FileNotFoundError`（异常消息还带着整页 133KB HTML），
+    `get_fundamentals` 的一致预期段与 `get_profit_forecast` 双双失效。
+
+    本仓 BUG1 已改为解析 `yjycData` 内嵌 JSON（`_re.search` + `_json.loads`），
+    **当前无任何 read_html 调用** —— 这条守卫把"不能退回旧实现"变成机器判据，
+    防止后人以"HTML 表格解析更通用"为由改回去（本仓声明 `pandas>=2.3.0`，
+    pandas 3.x 在允许区间内，属必现回归）。
+    """
+    import pathlib
+
+    src = pathlib.Path(a_stock.__file__).read_text(encoding="utf-8")
+    assert "read_html" not in src, (
+        "pandas 3.x 下 read_html(字符串) 必抛 FileNotFoundError；"
+        "一致预期请继续解析 yjycData 内嵌 JSON（见 _ths_eps_forecast docstring）"
+    )
 
 
 # ---------------------------------------------------------------------------

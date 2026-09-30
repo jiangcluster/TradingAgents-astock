@@ -6,6 +6,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.6.2] — 2026-09-30
+
+### Fixed（T3 移植：源仓库 2026-09-16 —— 概念板块 403 谎报 / 一致预期 pandas 3.x）
+
+来源提交：`a13f336`（概念板块）、`2444646` + `e58b94f`(#111)（一致预期），
+见 `A股Skill2.0新架构实施方案_20260930.md` §4.7 移植清单 B1/B2。
+
+#### B1 `get_concept_blocks`：把「取数被拦」当成「该股没有概念板块」
+
+百度 PAE 被风控时返回 HTTP 403 + `{"ResultCode": 0(**整数**), "Result": {"code": 403,
+"isCaptchaEnabled": true, "msg": "hit risk"}}`。外层 `ResultCode` 是**整数** 0，而判据是
+`str(d.get("ResultCode", -1)) != "0"` —— 整数 0 **放它过关**，随后 `result.get(code, [])`
+取空，落到 `No concept/block data for <code>`：**一次「取数被拦」被当成「该股确实没有
+概念板块」这个错的事实喂给模型**，报告里也完全看不出异常。
+
+- 本仓已有东财 `slist(spt=3)` 降级（源仓库没有），故合并后处置为**先降级**：
+  `Result.code == 403` → `_em_concept_blocks(code)`；降级也取不到时**如实报出「被风控拦截」**
+  并给出根因（该接口对 python-requests 的 TLS 指纹做风控，同一时刻 curl 正常，需
+  curl_cffi 浏览器指纹伪装才能稳定取数），**不再**退回 `No concept/block data`。
+- **未采纳**源仓库同提交里的 `params=` 改写（把内联 JSON 由 URL 拼接改为 `params=` 字典）。
+  理由：本仓 `code` 已由 `_normalize_ticker` 规范化为 6 位数字、无转义需求；而该改写
+  **无法在 403 环境下验证成功路径**（同一提交自述 403 属 TLS 指纹风控、requests 恒被拦），
+  属未验证变更 —— 按"不改动当前可工作的行为"保留原写法，避免把一个可用的请求形态
+  换成未验证形态。
+
+#### B2 `_ths_eps_forecast`：pandas 3.x 下一致预期必然取空 —— **本仓已覆盖，不重复移植**
+
+源仓库 `2444646` 修的是 `pd.read_html(r.text)`：pandas 3.x 起 `io` 参数只接受路径 / URL /
+文件对象，字符串被当**路径** → 必抛 `FileNotFoundError`（异常消息还带着整页 133KB HTML），
+`get_fundamentals` 一致预期段与 `get_profit_forecast` 双双失效。
+
+**本仓不存在该缺陷**：BUG1（0.5.21 同期）已把实现换成解析 `yjycData` 内嵌 JSON
+（`_re.search` + `_json.loads`），全仓**无任何 `read_html` 调用**，该路径不可达。
+按"两侧都要保留"的精神，改为**补回归守卫**而非重复移植（见下）。
+
+#### 反向对照（新增 4 例，`tests/test_astock_datasrc_fixes.py`）
+
+- `test_concept_blocks_403_with_integer_resultcode_falls_back`：该形态**必须**降级到东财
+  （阴性侧：旧判据对**整数** 0 放行，风控会被当成"无板块"）。
+- `test_concept_blocks_403_reports_blocked_not_no_data`：降级也空时文案须含「风控拦截」
+  与 `hit risk`，且**不得**出现 `No concept/block data`。
+- `test_concept_blocks_genuine_empty_still_says_no_data`：**反面对照** —— 真·无板块
+  （无 403 标记）仍须报 `No concept/block data`，防止把 403 处理扩大成"一切空结果都算被拦"。
+- `test_ths_eps_forecast_never_uses_read_html`：源码级守卫，禁止退回 `read_html`。
+
+**本机实测**：全量 → **775 passed / 13 skipped / 0 failed**（较上一版 771 增 4 例）。
+
 ## [0.6.1] — 2026-09-30
 
 ### Added（T2 移植：源仓库 v0.5.20 —— 外部调用加界）
