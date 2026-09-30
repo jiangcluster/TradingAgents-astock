@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.6.1] — 2026-09-30
+
+### Added（T2 移植：源仓库 v0.5.20 —— 外部调用加界）
+
+来源提交：`d393981`（v0.5.20），见 `A股Skill2.0新架构实施方案_20260930.md` §4.7 移植清单 A3。
+
+- `dataflows/alpha_vantage_common.py`：抽出模块级 `REQUEST_TIMEOUT = 30` 并用于
+  `requests.get(..., timeout=REQUEST_TIMEOUT)`。**本仓此前已硬编码 `timeout=30`，行为不变**；
+  本次抽为常量并纳入测试锁定 —— 测试同时钉"请求真的带了超时"与"超时值是正数"，
+  因为写成 `0`/`None` 会静默退化成**无限等**，而"`timeout` 键存在"的断言照样绿。
+- `llm_clients/claude_agent_sdk_client.py`：订阅主路径**不走 LangChain 客户端**，
+  v0.5.19 给所有 provider 加的那份 `timeout` 一点都罩不到它（Agent SDK 拉起 `claude`
+  子进程后卡住时 `async for` 永远悬着）。本次补齐它自己的超时：
+  - `ClaudeAgentSDKClient.__init__` 接收 `timeout`（由 `trading_graph._resilience_kwargs(
+    "claude_agent_sdk")` 注入，与其它 provider 同一配置项）；新增 `_positive_timeout()`
+    归一化 —— `None`/0/负数/不可解析/**布尔值**一律落到"不设超时"（0 或负数若照收，
+    等于把一个手滑的配置变成"这个 provider 一次都跑不通"）。
+  - `_timeout_for(max_turns)`：把 `llm_timeout` 从"**一次模型请求**"换算成"**一次
+    `.invoke()` 的整段预算**" —— Agent SDK 把整个工具循环跑在同一次调用里（最多
+    `max_turns` 轮），故预算 = `llm_timeout × max_turns`；单轮调用（deep / structured）
+    拿到的就是 `llm_timeout` 本身。**禁止**改成"整段固定 150s"：那会让分析师几乎每次
+    超时并降级到**按 token 计费**的 provider，正是启用订阅要避免的事。
+  - `_run_query()` 两层防护，缺一不可：① `asyncio.wait_for` 取消查询协程（`_query` 的
+    `finally` 随即关掉生成器与子进程）；② `_run_async(join_timeout=...)` 放进 **daemon**
+    工作线程 + 有界 join，兜底"SDK 连取消都不理"（SDK 阻塞自己的事件循环 / `aclose` 挂死）。
+    新增 `_CANCEL_GRACE = 30`。`budget=None`（没配 `llm_timeout`）时两层都不启用，
+    行为与改前完全一致。
+  - `_query()` 改为 `try/finally` 显式 `aclose()` SDK 异步生成器（连同它拉起的 `claude`
+    子进程），不再依赖事件循环的 `shutdown_asyncgens` 兜底 —— 线程分支上那个循环可能已被
+    我们放弃，靠兜底就真成泄漏。此处生成器必不在运行中，不会触发 "already running" 噪音。
+  - 新增 `_SDKTimeout` 并纳入 `_FALLBACK_ERRORS`：超时与 `_SDKResultError` **同类** —— 都是
+    "订阅这条路没能服务掉这次调用"，而另一个选项是**永远卡住**（卡住比降级更糟）。
+    **认证失败仍不在该元组**（降级 = 悄悄开始计费）。
+
+### Tests
+
+新增 **34 例**（全部不碰真实 provider、不发真实 HTTP、**不需要安装 claude-agent-sdk**）：
+
+- 新增 `tests/test_alpha_vantage_timeout.py`（**5 例**）：请求确实带 `timeout` 且等于
+  `REQUEST_TIMEOUT`；超时值为正且非 bool（阴性对照）；正常 CSV 返回不受影响；
+  限流识别照旧生效；缺 key 时在发请求**之前**就报错。
+- 新增 `tests/test_agent_sdk_timeout.py`（**29 例**）：`_positive_timeout` 多态归一化、
+  `_timeout_for` 按轮数放大（含 `max_turns` 兜底）、`_run_async` 的 daemon + 有界 join
+  与超时抛 `_SDKTimeout`、`wait_for` 取消路径、`aclose` 收尾、`_FALLBACK_ERRORS` 含超时
+  但不含认证失败等。**刻意不挂 `requires_sdk`**：订阅是可选 extra，干净安装里装不上，
+  把超时护栏挂在可选依赖上等于默认配置下一条都不跑 —— 改用替身顶住模块里两个 SDK 名字。
+
+**本机实测**：全量 → **771 passed / 13 skipped / 0 failed**（较上一版 737 增 34 例）。
+
 ## [0.6.0] — 2026-09-30
 
 ### Changed（版本号跳段：与源仓库 simonlin1212/TradingAgents-astock 的分叉显式化）
