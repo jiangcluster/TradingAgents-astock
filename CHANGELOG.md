@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.6.5] — 2026-09-30
+
+### Added / Changed（T7：T4 + B4 —— 缺失数据缺口透出 + 报告「数据不完整」警告）
+
+**为什么两项必须同批**：`missing_data` 的任务索引（T4/0.6.3 移植）此前**只写不读** ——
+它只进 `trading_graph._log_state`，而 headless 恒 `persist_state_log=False` ⇒ **不落盘**；
+而 B4（源仓库 `ac4de23`）的 PDF 警告**只读** `final_state["missing_data_tasks"]` /
+`missing_data_requires_reanalysis`。**不接 T4，B4 永远拿到 `None`、静默失效**（连"没显示"
+都看不出来）。另：2.0 的 `server/artifacts.py` 计划用 `analysis_detail` 反构 `final_state`
+（方案 §4.5）⇒ T4 也是 B4 在 2.0 PDF 路径上生效的**前置条件**。
+
+- **T4**（`cli/headless.py::_build_analysis_detail`）：透出四个键 —— `missing_data_tasks` /
+  `missing_data_complete` / `missing_data_requires_reanalysis` / `missing_data_updated_at`，
+  与 `_log_state` **同名同义**（两处结构保持一致）；全部带默认值降级（缺字段 → 「无缺口」
+  语义，不抛 `KeyError`）。这是该结构在 headless 下的**唯一出口**。
+- **B4**（`web/pdf_export.py`，源仓库 `ac4de23` 逐字移植）：新增 `_missing_data_warning()`；
+  `_ReportPDF` 保存 `final_state`；**封面**（股票代码之上）渲染警告；`generate_markdown`
+  在正文前追加 `> ⚠️ …`（缺 CJK 字体时 Markdown 是兜底交付物，必须同样带警告）。
+  文案两态：「仍有 N 个取数缺口，本报告按当前已有内容生成」/「数据已补齐但尚未重新分析」。
+
+### Tests
+
+新增 **6 例**：
+
+- `tests/test_headless_cli.py`（+3）：
+  - 扩 `test_run_headless_analysis_detail_missing_fields`：四个键必须**存在**且降级为
+    「无缺口」语义（`[]` / `True` / `False` / `None`），不得抛 KeyError；
+  - `test_run_headless_analysis_detail_carries_missing_data`：任务列表与三个标志**原样透出**；
+  - `test_missing_data_keys_contract_between_headless_and_pdf`：**跨模块契约守卫** ——
+    产出侧（`cli/headless.py`）四个键名与消费侧（`web/pdf_export.py`）两个读键名**必须同名**，
+    用源码级断言钉住（任一侧改名即红）。**刻意不做 import**：否则会被 `web` extra 的
+    `importorskip` 连带跳过，服务器无 streamlit 时这条守卫等于不存在。
+- `tests/test_pdf_export.py`（+4；随该文件既有的 `importorskip("streamlit")` 门控）：
+  活跃缺口计数（`status` 缺省视为 active，与索引一致）、补齐待重分析态、**阴性对照**
+  （无缺口/缺键/非法类型一律不报警且不抛错）、`generate_markdown` 必须带警告。
+
+**本机实测**：全量 → **802 passed / 13 skipped / 0 failed**（较上一版 796 增 6 例）。
+
+### Docs
+
+- `A股Skill2.0新架构实施方案_20260930.md`：§4.6 硬约束补**例外**说明（「`cli/**` / `web/**`
+  不动」不适用于**源仓库移植批次**）；§4.7 的 B4 状态由「暂缓」改为「✅ T7」。
+
 ## [0.6.4] — 2026-09-30
 
 ### Changed（T6 移植：源仓库 0.5.18 —— 辩论历史滚动窗口压缩 + last-arg 注入去重）

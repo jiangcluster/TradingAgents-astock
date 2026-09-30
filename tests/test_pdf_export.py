@@ -15,6 +15,8 @@ from web.pdf_export import (
     _discover_cjk_fonts,
     _find_cjk_fonts,
     _format_table_cells,
+    _missing_data_warning,
+    generate_markdown,
     generate_pdf,
 )
 
@@ -73,3 +75,55 @@ def test_wqy_discovery_reuses_same_font_for_bold(monkeypatch, tmp_path):
     monkeypatch.setattr("web.pdf_export._find_font_file", fake_find_font_file)
 
     assert _discover_cjk_fonts() == (wqy, wqy)
+
+
+# ---------------------------------------------------------------------------
+# 数据不完整警告（T7 / B4，源仓库 ac4de23）
+# ---------------------------------------------------------------------------
+
+
+def test_missing_data_warning_reports_active_gap_count():
+    """有活跃缺口时必须报数；`status` 缺省视为 active（与 missing_data 索引一致）。"""
+    state = {
+        "missing_data_tasks": [
+            {"status": "active"},
+            {"status": "resolved"},
+            {"id": "no-status-means-active"},
+        ]
+    }
+
+    msg = _missing_data_warning(state)
+
+    assert msg is not None
+    assert "2 个取数缺口" in msg
+
+
+def test_missing_data_warning_after_backfill_asks_reanalysis():
+    """缺口已补齐但没重跑时，文案要说明「仍基于补数前的分析结果」。"""
+    msg = _missing_data_warning(
+        {"missing_data_tasks": [{"status": "resolved"}],
+         "missing_data_requires_reanalysis": True}
+    )
+
+    assert msg is not None
+    assert "重新分析" in msg
+
+
+def test_missing_data_warning_is_silent_when_complete_or_absent():
+    """阴性对照：无缺口 / 缺键 / 非法类型都不得报警，也不得抛错。"""
+    assert _missing_data_warning({}) is None
+    assert _missing_data_warning({"missing_data_tasks": []}) is None
+    assert _missing_data_warning({"missing_data_tasks": [{"status": "resolved"}]}) is None
+    # 旧引擎/坏状态：类型不对时按「无缺口」处理（宁可少报，不可崩在渲染层）
+    assert _missing_data_warning({"missing_data_tasks": "oops"}) is None
+    assert _missing_data_warning({"missing_data_tasks": None}) is None
+
+
+def test_markdown_export_includes_missing_data_warning():
+    """Markdown 是 PDF 字体缺失时的兜底交付物，同样必须带警告。"""
+    md = generate_markdown(
+        {"missing_data_tasks": [{"status": "active"}], "market_report": "x"},
+        "600519", "2026-09-30", "HOLD",
+    )
+
+    assert "数据不完整" in md and "1 个取数缺口" in md

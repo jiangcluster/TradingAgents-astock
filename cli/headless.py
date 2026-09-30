@@ -17,7 +17,7 @@
 
     {"code":"600362","date":"2026-09-02","decision":"Buy",
      "rating_source":"label","final_decision_format":"structured",
-     "ta_version":"0.6.4","usage":{"llm_calls":37,"tokens_in":...,"tokens_out":...},
+     "ta_version":"0.6.5","usage":{"llm_calls":37,"tokens_in":...,"tokens_out":...},
      "final_trade_decision":"...","investment_plan":"...",
      "analysis_detail":{
        "analyst_reports":{"market":"...","social":"...",...},
@@ -166,6 +166,18 @@ def _build_analysis_detail(final_state: dict) -> dict:
             "rounds": int(risk_debate.get("count") or 0),
         },
         "final_trade_decision": str(final_state.get("final_trade_decision") or ""),
+        # 缺失数据任务（源仓库 2dad8af / 本仓 B3 的产出）。**T4**：此前该结构只进
+        # `trading_graph._log_state`，而 headless 恒 `persist_state_log=False` ⇒ 不落盘；
+        # 于是缺失数据「只写不读」（`~/.tradingagents/missing_data_tasks.json` 无人消费），
+        # 下游 PDF 警告（B4）也永远拿不到值。这里把它作为**唯一出口**透出。
+        # 四个键与 `_log_state` **同名同义**（两处结构保持一致）；全部带默认值降级，
+        # 缺字段（旧引擎/异常态）时退化为「无缺口」而非抛错。
+        "missing_data_tasks": final_state.get("missing_data_tasks") or [],
+        "missing_data_complete": bool(final_state.get("missing_data_complete", True)),
+        "missing_data_requires_reanalysis": bool(
+            final_state.get("missing_data_requires_reanalysis", False)
+        ),
+        "missing_data_updated_at": final_state.get("missing_data_updated_at"),
     }
 
 

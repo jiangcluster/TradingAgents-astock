@@ -123,6 +123,78 @@ def test_run_headless_analysis_detail_missing_fields(monkeypatch):
     assert detail["risk_debate"]["judge_decision"] == ""
     assert detail["trader_investment_plan"] == ""
     assert detail["final_trade_decision"] == "观望"
+    # T4：四个 missing_data_* 键必须**存在**，且降级为「无缺口」语义（不得抛 KeyError）
+    assert detail["missing_data_tasks"] == []
+    assert detail["missing_data_complete"] is True
+    assert detail["missing_data_requires_reanalysis"] is False
+    assert detail["missing_data_updated_at"] is None
+
+
+def test_run_headless_analysis_detail_carries_missing_data(monkeypatch):
+    """T4：缺失数据任务的四个键必须透出到 `analysis_detail`。
+
+    动因：headless 恒 `persist_state_log=False` ⇒ `_log_state` 里那四个键**不落盘**，
+    `analysis_detail` 是它们**唯一**的出口；PDF 侧「数据不完整警告」（B4）直接读它，
+    缺了就是静默失效（永远拿到 None，且不报错）。
+    """
+    tasks = [
+        {"id": "t1", "status": "active", "tool_name": "get_fund_flow"},
+        {"id": "t2", "status": "resolved", "tool_name": "get_hot_stocks"},
+    ]
+
+    class FakeGraph:
+        def __init__(self, selected_analysts, debug, config, callbacks=None):
+            pass
+
+        def propagate(self, code, date_str):
+            return (
+                {
+                    "final_trade_decision": "观望",
+                    "missing_data_tasks": tasks,
+                    "missing_data_complete": False,
+                    "missing_data_requires_reanalysis": True,
+                    "missing_data_updated_at": 1759000000.0,
+                },
+                "Hold",
+            )
+
+    _patch_graph(monkeypatch, FakeGraph)
+
+    detail = headless.run_headless(
+        "000001", "2026-09-02", ["market"], config={},
+    )["analysis_detail"]
+
+    assert detail["missing_data_tasks"] == tasks
+    assert detail["missing_data_complete"] is False
+    assert detail["missing_data_requires_reanalysis"] is True
+    assert detail["missing_data_updated_at"] == 1759000000.0
+
+
+def test_missing_data_keys_contract_between_headless_and_pdf():
+    """契约守卫（T7）：产出侧键名必须与 PDF 消费侧键名一致。
+
+    这两个名字跨模块（`cli/headless.py` 产出、`web/pdf_export.py` 消费），**没有**任何
+    编译器或类型检查能拦：任一侧改名都会让「数据不完整警告」**静默失效**（永远拿到
+    None 且不报错）。故用源码级断言把两侧钉在一起（不做 import，避免被 web extra 的
+    `importorskip` 连带跳过）。
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    producer = (root / "cli" / "headless.py").read_text(encoding="utf-8")
+    consumer = (root / "web" / "pdf_export.py").read_text(encoding="utf-8")
+
+    for key in (
+        "missing_data_tasks",
+        "missing_data_complete",
+        "missing_data_requires_reanalysis",
+        "missing_data_updated_at",
+    ):
+        assert f'"{key}"' in producer, f"headless 的 analysis_detail 契约缺键：{key}"
+    for key in ("missing_data_tasks", "missing_data_requires_reanalysis"):
+        assert f'"{key}"' in consumer, (
+            f"PDF 警告消费的键 {key} 在 pdf_export.py 里找不到（改名会导致警告静默失效）"
+        )
 
 
 def test_main_json_stdout(monkeypatch, capsys):

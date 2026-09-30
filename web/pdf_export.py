@@ -329,6 +329,32 @@ def _signal_color(signal: str) -> tuple[int, int, int]:
     return (251, 191, 36)
 
 
+def _missing_data_warning(final_state: dict[str, Any]) -> str | None:
+    """报告所用的输入数据不完整时，返回一句简短警告（否则 None）。
+
+    **T7 / B4**（源仓库 ac4de23）：报告是给人看的交付物，若分析建立在**部分失败**的
+    取数之上，读者必须一眼看到——否则会把"数据缺口下的结论"当成完整结论。
+
+    数据来源是 `missing_data` 的任务索引（经 `cli/headless.py::_build_analysis_detail`
+    透出的 `missing_data_tasks`）。缺键 / 非法类型一律按"无缺口"处理（返回 None），
+    不抛错——旧引擎的状态里没有这个键是正常情况。
+    """
+    tasks = final_state.get("missing_data_tasks")
+    active_count = (
+        sum(
+            1 for task in tasks
+            if isinstance(task, dict) and task.get("status", "active") == "active"
+        )
+        if isinstance(tasks, list)
+        else 0
+    )
+    if active_count:
+        return f"⚠️ 数据不完整：仍有 {active_count} 个取数缺口，本报告按当前已有内容生成。"
+    if final_state.get("missing_data_requires_reanalysis"):
+        return "⚠️ 数据已补齐但尚未重新分析：本报告仍基于补数前的分析结果。"
+    return None
+
+
 _REPORT_SECTIONS = [
     ("market_report", "技术分析报告"),
     ("sentiment_report", "市场情绪报告"),
@@ -353,6 +379,7 @@ class _ReportPDF(FPDF):
         self.ticker_label = stock_display_label(ticker, final_state)
         self.trade_date = trade_date
         self.signal = signal
+        self.final_state = final_state or {}
         regular_font, bold_font = _find_cjk_fonts()
 
         try:
@@ -413,6 +440,14 @@ class _ReportPDF(FPDF):
         self.set_text_color(255, 90, 31)
         self.cell(0, 12, "A股多Agent投研分析报告", align="C")
         self.ln(20)
+
+        # 数据不完整警告（B4）：置于封面股票代码之上，读者第一眼就能看到
+        warning = _missing_data_warning(self.final_state)
+        if warning:
+            self._use_font("B", 11)
+            self.set_text_color(190, 70, 20)
+            self._write_multicell(6, warning, align="C")
+            self.ln(8)
 
         self._use_font("B", 36)
         self.set_text_color(30, 30, 30)
@@ -664,6 +699,9 @@ def generate_markdown(final_state: dict[str, Any], ticker: str, trade_date: str,
         "---",
         "",
     ]
+    warning = _missing_data_warning(final_state)
+    if warning:
+        out.extend([f"> {warning}", ""])
     for title, content in _collect_sections(final_state, ticker):
         out.append(f"## {title}")
         out.append("")
