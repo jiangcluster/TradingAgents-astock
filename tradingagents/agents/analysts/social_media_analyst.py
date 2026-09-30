@@ -6,6 +6,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_language_instruction,
     get_news,
     get_stock_data,
+    run_analyst_turn,
 )
 from tradingagents.dataflows.config import get_config
 
@@ -81,16 +82,13 @@ def create_social_media_analyst(llm):
 
         chain = prompt | llm.bind_tools(tools)
 
-        result = chain.invoke(state["messages"])
-
-        report = ""
-
-        if len(result.tool_calls) == 0:
-            report = result.content
-
-        return {
-            "messages": [result],
-            "sentiment_report": report,
-        }
+        return run_analyst_turn(
+            llm=llm,
+            prompt=prompt,
+            chain=chain,
+            messages=state["messages"],
+            report_key="sentiment_report",
+            analyst_key="social",
+        )
 
     return social_media_analyst_node

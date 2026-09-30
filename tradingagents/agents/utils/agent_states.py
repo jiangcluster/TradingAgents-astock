@@ -1,4 +1,6 @@
+import operator
 from typing import Annotated
+
 from typing_extensions import TypedDict
 from langgraph.graph import MessagesState
 
@@ -65,6 +67,11 @@ class AgentState(MessagesState):
     # 本次实际进图的分析师键（market/social/... 的子集）。门控据此**只对已运行的分析师判级**——
     # 未选中的分析师若按空报告一律判 F，会在 7 项里凭空凑出 ≥4 个 F，反而把 LLM 复审整段跳过。
     selected_analysts: Annotated[list, "Analyst keys actually included in this run"]
+    # 因工具轮次上限被「收尾」的分析师键（0.6.7）。空 = 本次无截断。
+    # 用 `operator.add` 累加：7 个分析师逐次写入，无 reducer 会被后写整体覆盖。
+    # headless 把它透出到 `analysis_detail.analyst_truncations`，质量门控在摘要里显式提示，
+    # 使下游归因指向「被护栏截断」而非「数据源缺失」。
+    analyst_truncations: Annotated[list, operator.add]
 
     # researcher team discussion step
     investment_debate_state: Annotated[

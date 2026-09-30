@@ -9,6 +9,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_insider_transactions,
     get_language_instruction,
     get_profit_forecast,
+    run_analyst_turn,
 )
 from tradingagents.dataflows.config import get_config
 
@@ -78,16 +79,13 @@ def create_fundamentals_analyst(llm):
 
         chain = prompt | llm.bind_tools(tools)
 
-        result = chain.invoke(state["messages"])
-
-        report = ""
-
-        if len(result.tool_calls) == 0:
-            report = result.content
-
-        return {
-            "messages": [result],
-            "fundamentals_report": report,
-        }
+        return run_analyst_turn(
+            llm=llm,
+            prompt=prompt,
+            chain=chain,
+            messages=state["messages"],
+            report_key="fundamentals_report",
+            analyst_key="fundamentals",
+        )
 
     return fundamentals_analyst_node

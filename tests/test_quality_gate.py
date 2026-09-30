@@ -403,3 +403,75 @@ def test_skip_review_note_states_missing_data_is_direction_neutral():
     assert not llm.prompts, "过半报告未通过硬检查时不应再调用 LLM"
     assert "不得**据「缺数据」推出看空结论" in out
     assert "不要把「缺数据」当作「没有风险」" in out   # 两个方向都要堵
+
+
+# ---------------------------------------------------------------------------
+# 0.6.7：工具轮次上限收尾必须与「数据源缺失」显式区分
+# ---------------------------------------------------------------------------
+def test_gate_announces_tool_round_truncation():
+    """截断事件此前只写 logger（生产 headless 丢弃 stderr）→ 下游把它误归因成数据源缺失。
+
+    现要求在摘要里点名「哪几维被护栏收尾」，并显式声明**非数据源缺失**。
+    """
+    llm = FakeLLM()
+    node = qg.create_quality_gate(llm)
+
+    out = node(
+        _state(
+            selected_analysts=["market"],
+            market_report=FULL_REPORT,
+            analyst_truncations=["social", "hot_money"],
+        )
+    )["data_quality_summary"]
+
+    assert "[!] 工具轮次上限收尾" in out
+    assert "情绪分析师" in out and "游资追踪师" in out
+    assert "非数据源缺失" in out
+    assert "被护栏截断" in out
+
+
+def test_gate_truncation_notice_is_deduplicated():
+    """同一维被记两次（例如重跑/累加器重复）时只点名一次。"""
+    node = qg.create_quality_gate(FakeLLM())
+
+    out = node(
+        _state(
+            selected_analysts=["market"],
+            market_report=FULL_REPORT,
+            analyst_truncations=["social", "social"],
+        )
+    )["data_quality_summary"]
+
+    assert out.count("情绪分析师 的取数工具") == 1
+
+
+def test_gate_omits_truncation_notice_when_absent():
+    """无截断时不得出现该提示，且原有空行结构不被破坏（下游按行解析摘要）。"""
+    node = qg.create_quality_gate(FakeLLM())
+
+    for value in ([], None):
+        out = node(
+            _state(
+                selected_analysts=["market"],
+                market_report=FULL_REPORT,
+                analyst_truncations=value,
+            )
+        )["data_quality_summary"]
+
+        assert "工具轮次上限收尾" not in out
+        assert "（另 6 位未选中，未计入评级）\n\n### 硬检查结果" in out
+
+
+def test_gate_ignores_falsy_truncation_entries():
+    """空串/None 条目（累加器或旧 state 的脏值）不得渲染成空名字。"""
+    node = qg.create_quality_gate(FakeLLM())
+
+    out = node(
+        _state(
+            selected_analysts=["market"],
+            market_report=FULL_REPORT,
+            analyst_truncations=["", None],
+        )
+    )["data_quality_summary"]
+
+    assert "工具轮次上限收尾" not in out

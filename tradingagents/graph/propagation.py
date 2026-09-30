@@ -33,6 +33,8 @@ class Propagator:
             "trade_date": str(trade_date),
             "past_context": past_context,
             "selected_analysts": list(selected_analysts or []),
+            # 工具轮次上限收尾记录（0.6.7）：由各分析师节点在收尾时追加，空 = 无截断。
+            "analyst_truncations": [],
             "investment_debate_state": InvestDebateState(
                 {
                     "bull_history": "",

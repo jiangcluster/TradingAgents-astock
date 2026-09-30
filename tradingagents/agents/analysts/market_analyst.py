@@ -4,6 +4,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_indicators,
     get_language_instruction,
     get_stock_data,
+    run_analyst_turn,
 )
 from tradingagents.dataflows.config import get_config
 
@@ -95,16 +96,13 @@ MACD 类：
 
         chain = prompt | llm.bind_tools(tools)
 
-        result = chain.invoke(state["messages"])
-
-        report = ""
-
-        if len(result.tool_calls) == 0:
-            report = result.content
-
-        return {
-            "messages": [result],
-            "market_report": report,
-        }
+        return run_analyst_turn(
+            llm=llm,
+            prompt=prompt,
+            chain=chain,
+            messages=state["messages"],
+            report_key="market_report",
+            analyst_key="market",
+        )
 
     return market_analyst_node

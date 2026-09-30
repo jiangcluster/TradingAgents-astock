@@ -17,7 +17,7 @@
 
     {"code":"600362","date":"2026-09-02","decision":"Buy",
      "rating_source":"label","final_decision_format":"structured",
-     "ta_version":"0.6.6","usage":{"llm_calls":37,"tokens_in":...,"tokens_out":...},
+     "ta_version":"0.6.7","usage":{"llm_calls":37,"tokens_in":...,"tokens_out":...},
      "final_trade_decision":"...","investment_plan":"...",
      "analysis_detail":{
        "analyst_reports":{"market":"...","social":"...",...},
@@ -178,6 +178,10 @@ def _build_analysis_detail(final_state: dict) -> dict:
             final_state.get("missing_data_requires_reanalysis", False)
         ),
         "missing_data_updated_at": final_state.get("missing_data_updated_at"),
+        # 工具轮次上限收尾的分析师键（0.6.7）。此前该事件**只写 logger**，而 headless
+        # 生产（深研）成功路径丢弃 stderr ⇒ 交付链路上零留痕；下游（深研）把"整维为空"
+        # 误归因到数据源缺失。这里作为**机器可读出口**透出，供归因指向真实原因。
+        "analyst_truncations": list(final_state.get("analyst_truncations") or []),
     }
 
 

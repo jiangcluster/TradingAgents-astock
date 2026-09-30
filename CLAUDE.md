@@ -6,7 +6,7 @@
 - **仓库**: https://github.com/TauricResearch/TradingAgents
 - **协议**: Apache 2.0
 - **Python**: >=3.10
-- **当前版本**: 0.6.6（2026-09-30 发布；0.6.0 起版本号跳段，退出与源仓库 simonlin1212/TradingAgents-astock 重叠的 0.5.x 号段）
+- **当前版本**: 0.6.7（2026-09-30 发布；0.6.0 起版本号跳段，退出与源仓库 simonlin1212/TradingAgents-astock 重叠的 0.5.x 号段）
   ⚠️ 改版本号时**五处要一起改**：`pyproject.toml` / `CHANGELOG.md` / 这一行 /
   `tradingagents/__init__.py` 的 `__version__`（headless JSON 的 `ta_version` 取自它，
   下游靠它做版本握手）/ `cli/headless.py` docstring 里的示例 JSON（0.5.28 起纳入守卫）。
@@ -123,8 +123,13 @@ v0.2.5 起完全移除 akshare 依赖，所有数据通过直连 HTTP API 获取
   `max_tool_rounds_per_analyst` / `memory_holding_days` / `memory_min_holding_days`）
   由 `_validate_count_configs()` 在启动时校验为 ≥1 的整数：设成 0 不会报错，只会让某段
   流程悄悄消失（轮数 0 → Bear 永不发言）。**新增这类配置时一并加进该校验。**
-- 单个分析师的工具轮次上限是 `max_tool_rounds_per_analyst`（默认 12），超过即截断该
-  分析师。此前没有上限，唯一止损是全图 `recursion_limit`，撞上即整次运行作废。
+- 单个分析师的工具轮次上限是 `max_tool_rounds_per_analyst`（默认 12）。**达上限由分析师节点
+  自己转入「不带工具的收尾轮」**（`agents/utils/agent_utils.run_analyst_turn`），确保该维报告
+  不为空；`conditional_logic` 只保留 `used > max` 的极端兜底（节点未按约定收尾时才命中）。
+  此前护栏**就地截断**，而节点报告字段只在"本轮无 tool_calls"时赋值 ⇒ 该维报告恒为空串
+  （v0.6.7 实测：近 9 次生产运行 **7 次**出现整维空报告）。截断事件写入
+  `state["analyst_truncations"]`，由 headless 透出到 `analysis_detail.analyst_truncations`、
+  由门控在摘要里显式提示（**非数据源缺失**）。**新增分析师角色必须走 `run_analyst_turn`**。
 
 ### 质量门控的作用域与降级（v0.5.25 修正，v0.5.26 改判据）
 `agents/quality_gate.py` 位于「分析师 → 多空辩论」之间，结论 `data_quality_summary` 会流向

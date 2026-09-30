@@ -275,11 +275,25 @@ def create_quality_gate(llm):
             f"**审核范围**: 本次运行 {len(analysts)} 位分析师"
             + (f"（另 {len(skipped)} 位未选中，未计入评级）" if skipped else "")
         )
+        # 工具轮次上限收尾（0.6.7）：把「被护栏截断」与「数据源缺失」在摘要里显式区分开。
+        # 此前该事件只写 logger，而 headless 生产丢弃 stderr ⇒ 交付链路上零留痕，
+        # 下游（深研）只能看到"某维为空/缺失"，归因被带到数据源方向（实测输出"未归类"）。
+        truncations = [a for a in (state.get("analyst_truncations") or []) if a]
+        trunc_note = ""
+        if truncations:
+            names = "、".join(dict.fromkeys(ANALYST_NAMES.get(a, a) for a in truncations))
+            trunc_note = (
+                f"\n> **[!] 工具轮次上限收尾**：{names} 的取数工具调用达到轮次上限，"
+                f"该维报告由护栏**收尾**而成（**非数据源缺失**）。"
+                f"以上结论基于截断前已取得的数据，未取到的必采项已在报告中如实标注；"
+                f"归因请按「被护栏截断」处理，不要记成数据源不可用。\n"
+            )
         summary = (
             f"## 数据质量门控结果\n\n"
             f"**标的**: {ticker} | **交易日**: {trade_date}\n"
-            f"{scope_line}\n\n"
-            f"### 硬检查结果\n{hard_summary}\n\n"
+            f"{scope_line}\n"
+            f"{trunc_note}"
+            f"\n### 硬检查结果\n{hard_summary}\n\n"
             f"### LLM 复审\n"
             f"{llm_review if llm_review else '（未执行）'}\n"
         )

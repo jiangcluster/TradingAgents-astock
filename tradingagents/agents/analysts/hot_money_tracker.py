@@ -11,6 +11,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_news,
     get_northbound_flow,
     get_stock_data,
+    run_analyst_turn,
 )
 from tradingagents.dataflows.config import get_config
 
@@ -93,16 +94,13 @@ def create_hot_money_tracker(llm):
         prompt = prompt.partial(instrument_context=instrument_context)
 
         chain = prompt | llm.bind_tools(tools)
-        result = chain.invoke(state["messages"])
-
-        report = ""
-
-        if len(result.tool_calls) == 0:
-            report = result.content
-
-        return {
-            "messages": [result],
-            "hot_money_report": report,
-        }
+        return run_analyst_turn(
+            llm=llm,
+            prompt=prompt,
+            chain=chain,
+            messages=state["messages"],
+            report_key="hot_money_report",
+            analyst_key="hot_money",
+        )
 
     return hot_money_tracker_node

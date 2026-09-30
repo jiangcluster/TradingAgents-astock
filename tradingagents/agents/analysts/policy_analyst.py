@@ -4,6 +4,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_global_news,
     get_language_instruction,
     get_news,
+    run_analyst_turn,
 )
 from tradingagents.dataflows.config import get_config
 
@@ -70,16 +71,13 @@ def create_policy_analyst(llm):
         prompt = prompt.partial(instrument_context=instrument_context)
 
         chain = prompt | llm.bind_tools(tools)
-        result = chain.invoke(state["messages"])
-
-        report = ""
-
-        if len(result.tool_calls) == 0:
-            report = result.content
-
-        return {
-            "messages": [result],
-            "policy_report": report,
-        }
+        return run_analyst_turn(
+            llm=llm,
+            prompt=prompt,
+            chain=chain,
+            messages=state["messages"],
+            report_key="policy_report",
+            analyst_key="policy",
+        )
 
     return policy_analyst_node

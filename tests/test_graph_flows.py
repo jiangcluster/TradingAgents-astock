@@ -51,12 +51,30 @@ def test_analyst_routes_to_msg_clear_without_tool_calls(key):
 
 
 def test_tool_round_limit_truncates_runaway_analyst():
-    """达到轮次上限即截断，不再把整张图拖到 recursion_limit。"""
+    """**超出**上限即硬截断，不再把整张图拖到 recursion_limit。
+
+    0.6.7：上限边界改由分析师节点持有（`used == max` 时转入不带工具的收尾轮，
+    见 `agents/utils/agent_utils.run_analyst_turn`），本护栏退化为极端兜底 ——
+    只有节点未按收尾约定（例如新增角色忘记走 `run_analyst_turn`）时才会命中。
+    """
     logic = ConditionalLogic(max_tool_rounds=2)
-    # 已用 3 轮（3 条带 tool_calls 的消息），最后一条又要求调用工具
+    # 已用 3 轮（**超**上限）且最后一条仍在要求调用工具 → 兜底硬截断
     messages = [_Msg([{"n": 1}]), _Msg([]), _Msg([{"n": 2}]), _Msg([{"n": 3}])]
 
     assert logic.should_continue_market({"messages": messages}) == "Msg Clear Market"
+
+
+def test_tool_round_at_cap_defers_to_node_wrapup():
+    """恰达上限（`used == max`）**不得**就地截断，要把这一轮交给节点做收尾。
+
+    旧行为在这里直接跳 `Msg Clear`，而节点的报告字段只在"本轮无 tool_calls"时赋值
+    ⇒ 该维报告恒为空串（2026-09-30 实测：近 9 次生产运行 7 次出现整维空报告）。
+    """
+    logic = ConditionalLogic(max_tool_rounds=2)
+    messages = [_Msg([{"n": 1}]), _Msg([]), _Msg([{"n": 2}])]
+
+    assert logic._tool_rounds_used(messages) == 2
+    assert logic.should_continue_market({"messages": messages}) == "tools_market"
 
 
 def test_under_tool_round_limit_keeps_calling_tools():

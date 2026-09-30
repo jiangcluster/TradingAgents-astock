@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.6.7] — 2026-09-30
+
+### Fixed（工具轮次上限：截断不再留下空报告，且截断事件可被下游归因）
+
+**动因（实测缺陷）**：`graph/conditional_logic.py` 的 per-analyst 工具轮次护栏
+（`max_tool_rounds_per_analyst`，默认 12）达上限时**就地收口**，而 7 个分析师节点的
+`report` 只在"本轮无 tool_calls"时赋值（`if len(result.tool_calls) == 0: report = result.content`）
+⇒ 护栏命中时该维报告**恒为空串**：整维证据凭空消失、门控判 F，而原因在交付链路上
+**不可见**（只写 `logger.warning`，headless 生产成功路径丢弃 stderr）；下游深研只能看到
+"某维为空/缺失"，归因被带到数据源方向（实测输出「未归类（请人工确认）」）。
+
+**事实依据（2026-09-30）**：
+
+- **插桩复现**（生产同参、标的 301119）：
+  `Tool-call round limit reached (12) before Msg Clear Social` →
+  `[DIAG] used_rounds=12/12 last_has_tool_calls=True -> Msg Clear Social TRUNCATED` →
+  `sentiment_report len=0`（其余 6 维 2352~6765 字）；
+- **近 9 次生产缓存统计**：**7 次**出现整维空报告（情绪维 6 次、游资维 1 次）；
+  同期上游 `simonlin1212` 0.5.20（无此护栏）3 次均 7/7 维；
+- **触发条件与已知降级数据源吻合**：情绪/游资分析师的取数工具（主力资金、北向、热点榜）
+  在本网络被拦 → 模型反复重试取数，最易打满轮次上限。
+
+**改动**：
+
+- `agents/utils/agent_utils.py`：新增 `run_analyst_turn()` —— 达上限时**不再提供工具**、
+  追加 `ANALYST_WRAPUP_INSTRUCTION` 收尾请求，把正文写入报告字段并前置
+  `ANALYST_TRUNCATION_MARKER` 声明；返回消息**自行构造为不含 tool_calls**（保证路由收口）；
+  收尾调用自身失败按空报告处理（不阻断管线）但截断事件照常记录。另导出
+  `analyst_tool_rounds_used()` / `_analyst_tool_round_cap()`（与护栏取**同一配置键**）。
+- 7 个分析师节点（market / social / news / fundamentals / policy / hot_money / lockup）：
+  改用 `run_analyst_turn()`（新增角色必须同样接入，见 `CLAUDE.md`）。
+- `graph/conditional_logic.py`：护栏判据由 `used >= max` 放宽为 `used > max` ——
+  **上限边界改由节点持有**（`used == max` 即转入收尾轮），本护栏退化为极端兜底：
+  只有节点未按约定收尾（如新增角色漏接、收尾轮仍返回 tool_calls）时才命中，
+  比旧行为只多容忍一轮后照旧硬截断，**不会退化成无限循环**。
+- `agents/utils/agent_states.py` + `graph/propagation.py`：新增 state 字段
+  `analyst_truncations`（`operator.add` 累加 —— 无 reducer 时 7 次写入会互相覆盖）。
+- `cli/headless.py`：`analysis_detail` 新增 `analyst_truncations`（机器可读出口）。
+- `agents/quality_gate.py`：摘要顶部显式提示「**[!] 工具轮次上限收尾**（非数据源缺失）」，
+  把"被护栏截断"与"数据源不可用"分开，供下游归因。
+
+**测试**（新增 22 例）：`tests/test_analyst_wrapup.py`（新增，17 例：正常轮 / 未收尾轮 /
+达上限收尾 / 收尾失败 / 模型异常返回 tool_calls / cap=1 仍可调工具 / 配置 None·非法·0 三态 /
+state 累加器 / headless 透出）、`tests/test_graph_flows.py`（+1：恰达上限须交节点收尾，
+并把原用例改写为"**超出**上限才硬截断"）、`tests/test_quality_gate.py`（+4：提示出现 /
+同名去重 / 无截断时不出现且空行结构不变 / 脏条目不渲染）。
+
+**本机实测**：全量 → **827 passed / 15 skipped / 0 failed**（较上一版 805 增 22 例）。
+
 ## [0.6.6] — 2026-09-30
 
 ### Fixed（T8 移植：源仓库 `922db59` / #113 —— CLI 与客户端兜底端点分裂）
