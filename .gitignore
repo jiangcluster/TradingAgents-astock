@@ -150,6 +150,8 @@ activemq-data/
 # Environments
 .env
 .envrc
+# 部署侧 .env 备份（网关/直连切换期产物）——不得入库（2026-09-30 / B7′）
+.env.bak.*
 .venv
 env/
 venv/
