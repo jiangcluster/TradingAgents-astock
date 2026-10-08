@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.6.9] — 2026-10-08
+
+### Fixed（并发深研下「缺失数据索引」的跨进程竞态）
+
+**现象（2026-10-08 深研，A 股服务器）**：three-picker 出 3 只票，deep-advisor 以
+`parallel.max_workers=3` 并发拉起 3 个 TA 子进程，其中**2 只**以
+`TA 退出码 1: [Errno 2] No such file or directory: '…/missing_data_tasks.tmp' ->
+'…/missing_data_tasks.json'` 失败、无任何结论（仅 1 只走完）。
+
+**根因**：`dataflows/missing_data.py` 写索引用**固定**临时名 `<index>.tmp`，而
+`_INDEX_LOCK` 是 `threading.RLock`——只锁得住进程内线程。3 只票是**独立进程**，先完成者
+`replace` 掉 tmp 后，后完成者 `replace` 时该文件已不存在 → `FileNotFoundError` 冒泡到 TA
+进程顶层、整票退出。0.6.8「数据缺失可修项全量换源」显著增加了索引写入次数，把竞态窗口放大，
+故在升级后**首个交易日**（10-08）首次命中。
+
+**修复**（复用仓库既有的落盘原语 `tradingagents/utils/atomic_io.py`，不另起一套）：
+
+- 三处写盘（索引 / 重试输出缓存 / analysis log 快照）一律改走 `atomic_io.atomic_write`：
+  临时文件由 `tempfile.mkstemp` 生成（**唯一临时名**），并发写者各写各的再 `os.replace`
+  原子落盘。旧实现用固定 `<index>.tmp`，先完成者改名后，后完成者 rename 时该文件已不存在
+  → `FileNotFoundError` 冒泡到 TA 进程顶层、整票退出。
+- 索引的读-改-写（`_index_transaction`）在进程内 `_INDEX_LOCK` 之外再叠加
+  `atomic_io.file_lock`（跨进程锁文件 `<index>.lock`）——原子替换只保证"读不到半截"，
+  挡不住丢更新。持锁后**丢弃进程内索引缓存、强制回读磁盘**，避免拿「别的进程写入前」的
+  旧条目覆盖对方刚写的内容。
+- 约束：`file_lock` **不可重入**，故被 `_index_transaction` 装饰的函数之间不得相互嵌套调用
+  （当前调用图无嵌套——`retry_missing_tasks` 等外层函数都是顺序调用装饰函数）。
+
+**测试**：新增 4 例（跨进程锁被实际使用 / 无 `.tmp` 残留 / 写失败清理临时文件 /
+POSIX 三进程并发写同一索引且 300 条无丢失）。全量 pytest 849 passed / 16 skipped / 0 failed。
+
 ## [0.6.8] — 2026-09-30
 
 ### Fixed/Added（数据缺失：可修的全修 + 不可修的显式标注）

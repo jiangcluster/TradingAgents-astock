@@ -7,6 +7,7 @@ finished, and lets the Web UI retry the exact tool calls later.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -19,6 +20,7 @@ from typing import Any
 from langchain_core.messages import ToolMessage
 
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.utils import atomic_io
 from tradingagents.dataflows.utils import safe_ticker_component
 
 
@@ -85,12 +87,27 @@ _FAILURE_PATTERNS = [
 ]
 
 
+@contextlib.contextmanager
+def _index_transaction_lock():
+    """索引文件的读-改-写：进程内线程 + 跨进程双重串行。
+
+    进程内沿用 `_INDEX_LOCK`（RLock）；跨进程复用 `atomic_io.file_lock`（锁文件
+    `<index>.lock`）。持锁后丢弃进程内缓存、强制回读磁盘——否则会拿「别的进程写入前」
+    的旧条目做读-改-写，把对方刚写的内容覆盖掉（原子替换拦不住丢更新）。
+    """
+    path = _MISSING_DATA_TASKS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _INDEX_LOCK, atomic_io.file_lock(str(path)):
+        _INDEX_CACHE.pop(path, None)
+        yield
+
+
 def _index_transaction(func):
     """Serialize read-modify-write operations from parallel graph nodes."""
 
     @wraps(func)
     def _locked(*args, **kwargs):
-        with _INDEX_LOCK:
+        with _index_transaction_lock():
             return func(*args, **kwargs)
 
     return _locked
@@ -103,10 +120,9 @@ def _cache_path(task_id: str) -> Path:
 def _write_cached_output(task_id: str, content: Any) -> Path:
     path = _cache_path(task_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write("" if content is None else str(content))
-    tmp.replace(path)
+    atomic_io.atomic_write(
+        str(path), lambda f: f.write("" if content is None else str(content))
+    )
     return path
 
 
@@ -164,10 +180,10 @@ def _load_index() -> list[dict[str, Any]]:
 def _save_index(entries: list[dict[str, Any]]) -> None:
     path = _MISSING_DATA_TASKS_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(entries, f, ensure_ascii=False, indent=2, default=str)
-    tmp.replace(path)
+    atomic_io.atomic_write(
+        str(path),
+        lambda f: json.dump(entries, f, ensure_ascii=False, indent=2, default=str),
+    )
     # The next read can reuse the just-written in-memory list without parsing
     # the JSON again.  Copy the list so callers cannot mutate the cache behind
     # the index lock.
@@ -535,10 +551,10 @@ def sync_missing_snapshot_to_analysis_log(
         trade_date,
         requires_reanalysis=bool(requires_reanalysis),
     )
-    tmp = path.with_suffix(".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=4, default=str)
-    tmp.replace(path)
+    atomic_io.atomic_write(
+        str(path),
+        lambda f: json.dump(state, f, ensure_ascii=False, indent=4, default=str),
+    )
 
 
 def _tool_registry() -> dict[str, Any]:

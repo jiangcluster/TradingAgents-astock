@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from tradingagents.dataflows import missing_data
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture()
@@ -324,3 +329,98 @@ def test_fresh_run_removes_stale_active_and_consumed_tasks(missing_index):
     assert missing_data.get_missing_tasks(
         "300476", "2026-06-03", active_only=False
     ) == []
+
+
+def test_index_transaction_uses_cross_process_lock(missing_index, monkeypatch):
+    """索引的读-改-写必须拿跨进程锁（atomic_io.file_lock），不能只靠进程内 RLock。"""
+    from tradingagents.utils import atomic_io
+
+    calls: list[str] = []
+    real_lock = atomic_io.file_lock
+
+    def spy(path, timeout=atomic_io.DEFAULT_LOCK_TIMEOUT):
+        calls.append(path)
+        return real_lock(path, timeout)
+
+    monkeypatch.setattr(atomic_io, "file_lock", spy)
+
+    missing_data.record_tool_result(
+        ticker="300476",
+        trade_date="2026-06-03",
+        stage="market",
+        tool_name="get_indicators",
+        args={"symbol": "300476"},
+        content="Error fetching indicators",
+    )
+
+    assert str(missing_index) in calls
+
+
+def test_atomic_write_leaves_no_tmp_residue(missing_index):
+    missing_data._save_index([{"id": "t1"}])
+
+    assert json.loads(missing_index.read_text(encoding="utf-8"))[0]["id"] == "t1"
+    assert list(missing_index.parent.glob("*.tmp")) == []
+
+
+def test_atomic_write_cleans_tmp_on_failure(missing_index, monkeypatch):
+    from tradingagents.utils import atomic_io
+
+    def boom(*_args, **_kwargs):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(atomic_io.os, "replace", boom)
+
+    with pytest.raises(OSError):
+        missing_data._save_index([{"id": "t1"}])
+
+    assert list(missing_index.parent.glob("*.tmp")) == []
+
+
+@pytest.mark.skipif(
+    os.name != "posix", reason="用例靠 HOME 改派索引路径（POSIX 语义）"
+)
+def test_concurrent_processes_share_index_without_crash(tmp_path):
+    """3 个独立进程并发写同一索引（并发深研的真实形态）。
+
+    旧实现用固定 `<index>.tmp`：先完成者改名后，后完成者 rename 已不存在的文件 →
+    FileNotFoundError 崩掉整个 TA 进程（2026-10-08 深研 3 票里 2 票失败即此）。
+    新实现应做到：①无进程崩溃；②无更新丢失（300 个 task 全部落盘）。
+    """
+    script = (
+        "import sys\n"
+        "from tradingagents.dataflows import missing_data as md\n"
+        "n = int(sys.argv[1])\n"
+        "for i in range(100):\n"
+        "    md.record_tool_result(\n"
+        "        ticker=f'3000{(n * 100 + i) % 90:02d}',\n"
+        "        trade_date='2026-06-03',\n"
+        "        stage='market',\n"
+        "        tool_name='get_indicators',\n"
+        "        args={'seq': i},\n"
+        "        content='Error fetching indicators',\n"
+        "    )\n"
+    )
+    env = {**os.environ, "HOME": str(tmp_path), "PYTHONPATH": str(REPO_ROOT)}
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(n)],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for n in range(3)
+    ]
+
+    for proc in procs:
+        out, err = proc.communicate()
+        assert proc.returncode == 0, err or out
+
+    saved = json.loads(
+        (tmp_path / ".tradingagents" / "missing_data_tasks.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert len(saved) == 300
+    assert len({entry["id"] for entry in saved}) == 300

@@ -6,7 +6,7 @@
 - **仓库**: https://github.com/TauricResearch/TradingAgents
 - **协议**: Apache 2.0
 - **Python**: >=3.10
-- **当前版本**: 0.6.8（2026-09-30 发布；0.6.0 起版本号跳段，退出与源仓库 simonlin1212/TradingAgents-astock 重叠的 0.5.x 号段）
+- **当前版本**: 0.6.9（2026-10-08 发布；0.6.0 起版本号跳段，退出与源仓库 simonlin1212/TradingAgents-astock 重叠的 0.5.x 号段）
   ⚠️ 改版本号时**五处要一起改**：`pyproject.toml` / `CHANGELOG.md` / 这一行 /
   `tradingagents/__init__.py` 的 `__version__`（headless JSON 的 `ta_version` 取自它，
   下游靠它做版本握手）/ `cli/headless.py` docstring 里的示例 JSON（0.5.28 起纳入守卫）。
@@ -90,6 +90,12 @@ v0.2.5 起完全移除 akshare 依赖，所有数据通过直连 HTTP API 获取
 `_market_today()`（Asia/Shanghai），**不要用主机本地时区**——主机在 UTC+8 以西会把当天
 缓存当隔日重抓，以东会把昨天的缓存当今天复用（少一根日线）。`a_stock` 的
 `_cache_lock` / `_atomic_write` 只是本层别名，新代码直接用 `atomic_io`。
+
+`missing_data` 的缺失数据索引（`~/.tradingagents/missing_data_tasks.json`）同样适用这两条：
+写盘走 `atomic_write`，读-改-写走 `file_lock`（0.6.9 修：此前用固定 `<index>.tmp`，并发
+深研的多个 TA 子进程会把这个临时文件互相改名走，抛 `FileNotFoundError` 直接崩掉整票、
+当天无结论）。注意 `file_lock` **不可重入**——被 `_index_transaction` 装饰的函数之间
+不要嵌套调用。
 
 ### 决策输出契约：评级来源 + 版本（v0.5.26 新增，改 PM/输出字段必读）
 "模型说了 Hold"与"我们没解析出评级、落到了默认 Hold"必须在数据上可区分——否则一次
