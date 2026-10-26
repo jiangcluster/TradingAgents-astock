@@ -6,6 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.6.10] — 2026-10-26
+
+### Fixed（Windows + 代理网络下让取数与输出直接失效的三个缺陷）
+
+**动因**：把 TA 接进 WorkBuddy 专家包时在 Windows + 代理网络实测，下列三个缺陷逐一复现。
+
+#### 1. 中文股票名解析没有 HTTP 通道 → 代理网络下必然失败，且先卡 3~4 分钟
+
+`resolve_ticker('贵州茅台')` 原来只走 `_build_name_code_map()` → `_mootdx_call("stocks")`。
+TCP 7709 在代理/公司网络里常被整段拦截：端口"能连上"、协议握手全失败，38 台服务器逐台
+探测后抛错。实测（2026-10-26，本机）该路径失败耗时 **3m52s**，期间没有任何 HTTP 兜底，
+而名称解析本可以是一次 0.3s 的 HTTP 查询。
+
+修复：新增东财代码检索通道 `_resolve_name_via_http()`（`search-codetable` 接口，
+`suggest/get` 对 Python 请求实测只回 passportWeb 的 JSONP，不可用），`resolve_ticker`
+**先走 HTTP**，命中即返回；接口可用但无匹配时**直接**给出可纠正的错误（不再白等一轮
+TCP 探测）；只有接口本身不可用（网络/解析异常）才回退原 mootdx 对照表。结果按名称做
+进程内缓存。非 A 股条目（港股/基金/指数）按 `securityTypeName`（沪A/深A/北A）+ 6 位
+代码双重过滤。
+
+#### 2. mootdx 探测没有时间预算 → 首次取数像卡死
+
+`_get_mootdx_client()` 逐台 `Quotes.factory` 用 mootdx 默认 15s 建连超时；TCP 端口被代理
+"接受"时每台都要等满，38 台合计 3~4 分钟，而 HTTP 备源拿到同样的 K 线只要 0.4s。
+
+修复：
+
+- 新增 `_MOOTDX_PROBE_BUDGET_S`（默认 25s，环境变量 `MOOTDX_PROBE_BUDGET_S` 可覆盖）作为
+  整轮探测的墙钟预算，到点即停、记负缓存，交给 HTTP 备源；
+- 每台建连显式传 `timeout=_TDX_HANDSHAKE_TIMEOUT_S`（3s）；
+- 预算用尽后不再尝试裸 factory（同样要建连，只会把卡顿延长），报错文案区分"预算用尽"与
+  "TCP 不通"。
+
+**不改**"把整张表试完"的语义：瞬时失败的服务器仍逐台验证（`test_mootdx_server_selection.py`
+用例继续通过）——预算按墙钟，不按失败台数。
+
+#### 3. Windows GBK 控制台下 headless 输出 JSON 直接崩
+
+`cli/headless.py` 用 `print(json.dumps(..., ensure_ascii=False))` 写结果，而 Windows 控制台/
+管道默认 cp936：结果里的 `⚠️`（数据层每条未来函数警告都带）会让 `print` 抛
+`UnicodeEncodeError`——**整轮分析（实测 20 分钟）跑完后结论直接丢失**，下游只看到 exit 1。
+
+修复：新增 `_force_utf8_stdio()`，在 `main()` 解析参数后、任何 print 之前把 stdout/stderr
+切到 UTF-8（`errors="replace"`；非常规流或不支持 reconfigure 时静默跳过，不影响主流程）。
+
+### Tests
+
+新增 15 例：`test_name_resolution_http.py`（9）/ `test_mootdx_probe_budget.py`（3）/
+`test_headless_utf8_stdio.py`（3）。全量 `pytest tests/`：**864 passed / 16 skipped /
+0 failed**（Windows + Python 3.14 实测）。
+
 ## [0.6.9] — 2026-10-08
 
 ### Fixed（并发深研下「缺失数据索引」的跨进程竞态）

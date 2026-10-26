@@ -159,6 +159,74 @@ def _build_name_code_map() -> tuple[dict[str, str], dict[str, str]]:
     return _name_to_code, _code_to_name
 
 
+# 东财代码检索接口：中文名 → 代码的 **HTTP** 通道。
+# mootdx 的 `stocks()` 走 TCP 7709，该端口在代理/公司网络里常被整段拦截；此时
+# `resolve_ticker` 只能报错，且要先等完 38 台服务器探测（实测 3~4 分钟）。名称解析
+# 本质是"查一张对照表"，不该被一个可选数据通道绑架——HTTP 可用就用 HTTP。
+# 端点说明：`searchapi.../suggest/get` 对 Python 请求会返回 passportWeb 的 JSONP
+# （用户/别名检索，不含代码），实测（2026-10-26）不可用；codetable 检索才返回
+# `result[].code / shortName / securityTypeName`（沪A/深A/北A）。
+_EM_CODETABLE_URL = "https://search-codetable.eastmoney.com/codetable/search/web"
+_http_name_cache: dict[str, str] = {}
+
+
+def _is_a_share_code(code: str) -> bool:
+    """6 位 A 股代码（沪深主板/创业板/科创板 + 北交所 4x/8x/92x）。"""
+    return bool(_re.fullmatch(r"[034689]\d{5}", code))
+
+
+def _resolve_name_via_http(name: str) -> "str | None":
+    """用东财代码检索接口把中文股票名解析成 6 位代码。
+
+    返回 6 位代码；接口可用但无匹配时返回 None；接口本身不可用（网络/解析异常）时
+    抛异常，由调用方回退到 mootdx 对照表。**不在接口可用但无匹配时回退**——那只会
+    白等一轮 TCP 探测，最后仍报同一个"找不到股票"。
+    """
+    cached = _http_name_cache.get(name)
+    if cached:
+        return cached
+
+    params = {"client": "web", "keyword": name, "pageIndex": "1", "pageSize": "10"}
+    resp = _em_get(_EM_CODETABLE_URL, params=params, timeout=10)
+    resp.raise_for_status()
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        # JSONP/HTML 之类的非 JSON 响应按"接口不可用"处理，交给 mootdx 兜底
+        raise RuntimeError(f"东财代码检索返回非 JSON：{resp.text[:80]!r}") from exc
+
+    rows = (payload or {}).get("result") or []
+
+    candidates: list[tuple[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        # 只认 A 股：securityTypeName 为 沪A / 深A / 北A（港股、基金、指数不在此列）
+        if not str(row.get("securityTypeName", "")).endswith("A"):
+            continue
+        code = str(row.get("code") or "").strip()
+        label = str(row.get("shortName") or "").strip().replace(" ", "").replace("　", "")
+        if _is_a_share_code(code) and label:
+            candidates.append((label, code))
+
+    if not candidates:
+        return None
+
+    for label, code in candidates:
+        if label == name:
+            _http_name_cache[name] = code
+            return code
+
+    hits = [(label, code) for label, code in candidates if name in label]
+    if len(hits) == 1:
+        _http_name_cache[name] = hits[0][1]
+        return hits[0][1]
+    if len(hits) > 1:
+        examples = ", ".join(f"{label}({code})" for label, code in hits[:5])
+        raise ValueError(f"'{name}' 匹配到多只股票: {examples}，请输入完整名称或代码")
+    return None
+
+
 def resolve_ticker(user_input: str) -> str:
     """Resolve user input (code or Chinese name) to a 6-digit A-stock code.
 
@@ -176,6 +244,23 @@ def resolve_ticker(user_input: str) -> str:
         return _normalize_ticker(s)
 
     clean = s.replace(" ", "").replace("　", "")
+
+    # 先走 HTTP：不依赖通达信端口，且失败得快（实测 0.3s 量级）。
+    try:
+        http_code = _resolve_name_via_http(clean)
+    except ValueError:
+        raise
+    except Exception as e:  # 接口本身不可用 → 只有这时才回退 mootdx 对照表
+        logger.warning("东财 suggest 名称解析失败（%s），回退 mootdx 对照表", e)
+    else:
+        if http_code:
+            return http_code
+        raise ValueError(
+            f"找不到股票 '{s}'。ticker 参数只接受 6 位股票代码（如 '600519'）"
+            f"或完整股票名称（如 '贵州茅台'）；行业/概念/板块名（如 '游戏'）不是"
+            f"有效的股票标识。请改用目标个股的 6 位股票代码重试。"
+        )
+
     n2c, _ = _build_name_code_map()
 
     if clean in n2c:
@@ -297,6 +382,18 @@ _TDX_CANARY_SYMBOL = "600519"
 # 放大成"每个请求卡几十秒"。
 _MOOTDX_RETRY_AFTER_S = 300.0
 _mootdx_unavailable_until = 0.0
+
+# 单台服务器的建连超时（秒）。mootdx 默认 15s，逐台 38 台就是几分钟。
+_TDX_HANDSHAKE_TIMEOUT_S = 3.0
+
+# 整轮服务器探测的时间预算（秒，可用环境变量 MOOTDX_PROBE_BUDGET_S 覆盖）。
+# 现实里 TCP 7709 常被代理/防火墙整段拦截：端口"能连上"但协议握手全部失败，
+# 38 台逐台等满自身超时 → **首次取数卡 3~4 分钟**（2026-10-26 实测），而 HTTP
+# 备源（东财/腾讯/新浪）拿到同样的 K 线只要 0.4s。预算用尽即停止探测、记负缓存、
+# 让调用方走 HTTP 备源——"宁可降级也不要让用户干等"。
+_MOOTDX_PROBE_BUDGET_S = float(
+    os.environ.get("MOOTDX_PROBE_BUDGET_S", "25") or 25
+)
 
 # ⚠️ 曾经加过「连续 N 台协议失败就停手」的提前退出，已移除：三台远端拒绝**证明不了**
 # 本地网络封了协议，而列表里靠后的服务器完全可能是好的。提前收手会让那台可用服务器
@@ -441,6 +538,9 @@ def _get_mootdx_client():
 
     from mootdx.quotes import Quotes
 
+    deadline = time.monotonic() + _MOOTDX_PROBE_BUDGET_S
+    budget_hit = False
+
     tcp_ok_but_dead = 0
     # 探测会覆写 mootdx 的持久化配置——包在这里，只有真选出可用服务器时才 keep()，
     # 其余每条退出路径（含异常）都自动还原。
@@ -450,13 +550,24 @@ def _get_mootdx_client():
         # 原顺序、逐台做真实取数验证，精选表依旧优先。
         reachable = _reachable_tdx_servers(_candidate_tdx_servers())
 
-        for ip, port in reachable:
+        for tried, (ip, port) in enumerate(reachable, 1):
+            # 预算按**墙钟**算，不按失败台数算：三台远端拒绝证明不了后面的不可用，
+            # 但"已经让用户等了 N 秒"是确定的事实，该收手就收手（HTTP 备源仍在）。
+            if time.monotonic() >= deadline:
+                budget_hit = True
+                logger.warning(
+                    "mootdx 探测预算 %.0fs 用尽（已试 %d/%d 台），停止探测、改走 HTTP 备源",
+                    _MOOTDX_PROBE_BUDGET_S, tried - 1, len(reachable),
+                )
+                break
             # 「TCP 通但通达信协议不通」有两种表现：factory 建连时握手就被拒，
             # 或者建出来了但取不到数。**两种都要算**——只统计后者的话，计数永远是 0
             # （实测这批服务器全是在 factory 里抛 ConnectionReset），下面的快速失败
             # 判断就失效了。
             try:
-                candidate = Quotes.factory(market="std", server=(ip, port))
+                candidate = Quotes.factory(
+                    market="std", server=(ip, port), timeout=_TDX_HANDSHAKE_TIMEOUT_S
+                )
             except Exception as e:
                 tcp_ok_but_dead += 1
                 logger.debug("mootdx %s:%s 握手失败（%s），换下一台", ip, port, type(e).__name__)
@@ -474,18 +585,35 @@ def _get_mootdx_client():
     # ⚠️ 刻意**不用** `bestip=True`：它会把整张主机表做一遍测速，实测要几分钟。
     # `_candidate_tdx_servers()` 已经把 mootdx 自带的完整主机表逐台验证过了，
     # 覆盖面不比 bestip 差，而且每台都是"真取到数才算通过"。
-    try:
-        candidate = Quotes.factory(market="std")
-    except Exception as e:
-        logger.debug("mootdx 裸 factory 失败 — %s", e)
+    # 预算已用尽时跳过：裸 factory 同样要建连，再等一轮只是把卡顿延长。
+    if budget_hit:
+        logger.debug("mootdx 探测预算已用尽，跳过裸 factory 兜底")
     else:
-        if _tdx_client_works(candidate):
+        try:
+            candidate = Quotes.factory(market="std", timeout=_TDX_HANDSHAKE_TIMEOUT_S)
+        except TypeError:
+            # 少数 mootdx 版本的 factory 不接受 timeout，退回默认参数（不影响正确性）
+            try:
+                candidate = Quotes.factory(market="std")
+            except Exception as e:
+                logger.debug("mootdx 裸 factory 失败 — %s", e)
+                candidate = None
+        except Exception as e:
+            logger.debug("mootdx 裸 factory 失败 — %s", e)
+            candidate = None
+        if candidate is not None and _tdx_client_works(candidate):
             logger.info("mootdx client from 裸 factory（用户已有配置）")
             _mootdx_client = candidate
             return _mootdx_client
 
     _mootdx_unavailable_until = time.time() + _MOOTDX_RETRY_AFTER_S
-    if tcp_ok_but_dead:
+    if budget_hit:
+        cause = (
+            "探测时间预算 %.0fs 已用尽（端口能连上，但通达信协议握手迟迟不完成）。"
+            "这通常是协议层被拦（代理、防火墙、公司网络对 TCP 7709 的策略），"
+            "换服务器解决不了。" % _MOOTDX_PROBE_BUDGET_S
+        )
+    elif tcp_ok_but_dead:
         # 说清楚是"协议被拒"而不是"连不上"——这两者的排查方向完全不同。
         cause = (
             "%d 台服务器端口能连上，但通达信协议握手/取数被拒。"

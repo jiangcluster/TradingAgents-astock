@@ -17,7 +17,7 @@
 
     {"code":"600362","date":"2026-09-02","decision":"Buy",
      "rating_source":"label","final_decision_format":"structured",
-     "ta_version":"0.6.9","usage":{"llm_calls":37,"tokens_in":...,"tokens_out":...},
+     "ta_version":"0.6.10","usage":{"llm_calls":37,"tokens_in":...,"tokens_out":...},
      "final_trade_decision":"...","investment_plan":"...",
      "analysis_detail":{
        "analyst_reports":{"market":"...","social":"...",...},
@@ -185,6 +185,26 @@ def _build_analysis_detail(final_state: dict) -> dict:
     }
 
 
+def _force_utf8_stdio() -> None:
+    """把 stdout/stderr 切到 UTF-8。
+
+    Windows 控制台/管道默认 GBK（cp936），而分析结果里必然带 `⚠️` 之类的字符
+    （数据层每条未来函数警告、agent 报告里的图标）。`print(json.dumps(..., ensure_ascii=False))`
+    走到一半抛 `UnicodeEncodeError` 时，整轮分析（实测 20 分钟）已经跑完——结论
+    直接丢失，下游只看到一个 exit 1。调用方（深研/WorkBuddy）解析的是 stdout 的
+    单行 JSON，**必须**先保证能写出去。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            # 非常规流（已关闭/被替换成不支持 reconfigure 的对象）不影响主流程
+            pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="tradingagents-run",
@@ -203,6 +223,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="JSON 配置覆盖项（与 DEFAULT_CONFIG 合并），如 llm_provider/deep_think_llm",
     )
     args = parser.parse_args(argv)
+
+    # 必须在任何 print 之前：否则 GBK 控制台会在输出结果时抛 UnicodeEncodeError。
+    _force_utf8_stdio()
 
     # API key：环境变量优先；再尝试 cwd/.env（调用方通常 cwd=TA 仓库）。
     load_dotenv()
