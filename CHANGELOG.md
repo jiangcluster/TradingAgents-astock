@@ -12,11 +12,11 @@ Breaking changes within the 0.x line are called out explicitly.
 
 **动因**：把 TA 接进 WorkBuddy 专家包时在 Windows + 代理网络实测，下列三个缺陷逐一复现。
 
-#### 1. 中文股票名解析没有 HTTP 通道 → 代理网络下必然失败，且先卡 3~4 分钟
+#### 1. 中文股票名解析没有 HTTP 通道 → 代理网络下必然失败，且先卡 3 分钟以上
 
 `resolve_ticker('贵州茅台')` 原来只走 `_build_name_code_map()` → `_mootdx_call("stocks")`。
 TCP 7709 在代理/公司网络里常被整段拦截：端口"能连上"、协议握手全失败，38 台服务器逐台
-探测后抛错。实测（2026-10-26，本机）该路径失败耗时 **3m52s**，期间没有任何 HTTP 兜底，
+探测后抛错。实测（2026-10-26，本机）该路径 **>180s 仍未返回**，期间没有任何 HTTP 兜底，
 而名称解析本可以是一次 0.3s 的 HTTP 查询。
 
 修复：新增东财代码检索通道 `_resolve_name_via_http()`（`search-codetable` 接口，
@@ -29,7 +29,7 @@ TCP 探测）；只有接口本身不可用（网络/解析异常）才回退原
 #### 2. mootdx 探测没有时间预算 → 首次取数像卡死
 
 `_get_mootdx_client()` 逐台 `Quotes.factory` 用 mootdx 默认 15s 建连超时；TCP 端口被代理
-"接受"时每台都要等满，38 台合计 3~4 分钟，而 HTTP 备源拿到同样的 K 线只要 0.4s。
+"接受"时每台都要等满，38 台合计 3 分钟以上，而 HTTP 备源拿到同样的 K 线只要 0.4s。
 
 修复：
 

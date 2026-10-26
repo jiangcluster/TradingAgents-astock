@@ -161,7 +161,7 @@ def _build_name_code_map() -> tuple[dict[str, str], dict[str, str]]:
 
 # 东财代码检索接口：中文名 → 代码的 **HTTP** 通道。
 # mootdx 的 `stocks()` 走 TCP 7709，该端口在代理/公司网络里常被整段拦截；此时
-# `resolve_ticker` 只能报错，且要先等完 38 台服务器探测（实测 3~4 分钟）。名称解析
+# `resolve_ticker` 只能报错，且要先等完 38 台服务器探测（本机实测 >180s 仍未返回）。名称解析
 # 本质是"查一张对照表"，不该被一个可选数据通道绑架——HTTP 可用就用 HTTP。
 # 端点说明：`searchapi.../suggest/get` 对 Python 请求会返回 passportWeb 的 JSONP
 # （用户/别名检索，不含代码），实测（2026-10-26）不可用；codetable 检索才返回
@@ -388,7 +388,7 @@ _TDX_HANDSHAKE_TIMEOUT_S = 3.0
 
 # 整轮服务器探测的时间预算（秒，可用环境变量 MOOTDX_PROBE_BUDGET_S 覆盖）。
 # 现实里 TCP 7709 常被代理/防火墙整段拦截：端口"能连上"但协议握手全部失败，
-# 38 台逐台等满自身超时 → **首次取数卡 3~4 分钟**（2026-10-26 实测），而 HTTP
+# 38 台逐台等满自身超时 → **首次取数卡 3 分钟以上**（2026-10-26 本机实测：>180s 未返回），而 HTTP
 # 备源（东财/腾讯/新浪）拿到同样的 K 线只要 0.4s。预算用尽即停止探测、记负缓存、
 # 让调用方走 HTTP 备源——"宁可降级也不要让用户干等"。
 _MOOTDX_PROBE_BUDGET_S = float(
